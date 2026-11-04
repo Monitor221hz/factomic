@@ -8,3 +8,7 @@ repository.workspace = true
 [dependencies]
 fjall.workspace = true
 thiserror.workspace = true
+jiff.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
