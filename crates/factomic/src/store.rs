@@ -177,7 +177,9 @@ impl Store {
     }
 
     pub(crate) fn alloc_txn_id(&self) -> Result<TxnId> {
-        Ok(TxnId::new(self.alloc_entity_id(SYSTEM_PARTITION)?.0))
+        Ok(TxnId::with_value(
+            self.alloc_entity_id(SYSTEM_PARTITION)?.as_u64(),
+        ))
     }
 
     fn alloc_entity_id(&self, partition: u8) -> Result<EntityId> {

@@ -1,5 +1,5 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EntityId(pub(crate) u64);
+pub struct EntityId(u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AttributeId(u16);
@@ -17,6 +17,14 @@ impl EntityId {
         assert!(index < (1 << 56));
         let shifted = (partition as u64) << 56;
         EntityId(shifted | index)
+    }
+
+    pub fn with_value(value: u64) -> Self {
+        EntityId(value)
+    }
+
+    pub fn as_u64(&self) -> u64 {
+        self.0
     }
 
     pub fn partition(&self) -> u8 {
@@ -47,7 +55,13 @@ impl AttributeId {
 }
 
 impl TxnId {
-    pub fn new(id: u64) -> Self {
+    pub fn new(partition: u8, index: u64) -> Self {
+        assert!(index < (1 << 56));
+        let shifted = (partition as u64) << 56;
+        TxnId(shifted | index)
+    }
+
+    pub fn with_value(id: u64) -> Self {
         TxnId(id)
     }
 
@@ -60,7 +74,7 @@ impl TxnId {
     }
 
     pub fn entity_id(&self) -> EntityId {
-        EntityId(self.as_u64())
+        EntityId::with_value(self.as_u64())
     }
 }
 
@@ -96,7 +110,7 @@ mod tests {
 
     #[test]
     fn txn_id_is_an_entity_id() {
-        let txn = TxnId::new(EntityId::new(SYSTEM_PARTITION, 7).0);
+        let txn = TxnId::new(SYSTEM_PARTITION, 7);
         assert_eq!(txn.entity_id().partition(), SYSTEM_PARTITION);
         assert_eq!(txn.entity_id().index(), 7);
     }

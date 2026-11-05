@@ -85,7 +85,7 @@ mod tests {
     fn factom_accessors() {
         let e = EntityId::new(USER_PARTITION, 1);
         let a = AttributeId::new(0x0100);
-        let t = TxnId::new(EntityId::new(SYSTEM_PARTITION, 1).0);
+        let t = TxnId::new(SYSTEM_PARTITION, 1);
         let factom = Factom::new(e, a, Value::Long(30), t, Op::Assert);
         assert_eq!(factom.entity(), e);
         assert_eq!(factom.attribute(), a);

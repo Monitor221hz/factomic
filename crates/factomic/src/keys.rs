@@ -105,7 +105,7 @@ pub fn decode_eavt_key(key: &[u8]) -> Result<(EntityId, AttributeId, Value)> {
         }
     }
     let key = (
-        EntityId(u64::from_be_bytes(key[0..8].try_into().unwrap())),
+        EntityId::with_value(u64::from_be_bytes(key[0..8].try_into().unwrap())),
         AttributeId::new(u16::from_be_bytes(key[8..10].try_into().unwrap())),
         Value::decode_key(&key[10..])?,
     );
@@ -126,7 +126,7 @@ pub fn decode_aevt_key(key: &[u8]) -> Result<(AttributeId, EntityId, Value)> {
     }
     let key = (
         AttributeId::new(u16::from_be_bytes(key[0..2].try_into().unwrap())),
-        EntityId(u64::from_be_bytes(key[2..10].try_into().unwrap())),
+        EntityId::with_value(u64::from_be_bytes(key[2..10].try_into().unwrap())),
         Value::decode_key(&key[10..])?,
     );
 
@@ -146,7 +146,7 @@ pub fn decode_avet_key(key: &[u8]) -> Result<(AttributeId, Value, EntityId)> {
     let key = (
         AttributeId::new(u16::from_be_bytes(key[0..2].try_into().unwrap())),
         Value::decode_key(&key[2..key.len() - 8])?,
-        EntityId(u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap())),
+        EntityId::with_value(u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap())),
     );
 
     Ok(key)
@@ -163,9 +163,9 @@ pub fn decode_vaet_key(key: &[u8]) -> Result<(EntityId, AttributeId, EntityId)> 
         }
     }
     let key = (
-        EntityId(u64::from_be_bytes(key[0..8].try_into().unwrap())),
+        EntityId::with_value(u64::from_be_bytes(key[0..8].try_into().unwrap())),
         AttributeId::new(u16::from_be_bytes(key[8..10].try_into().unwrap())),
-        EntityId(u64::from_be_bytes(key[10..18].try_into().unwrap())),
+        EntityId::with_value(u64::from_be_bytes(key[10..18].try_into().unwrap())),
     );
 
     Ok(key)
@@ -182,10 +182,10 @@ pub fn decode_eavt_history_key(key: &[u8]) -> Result<(EntityId, AttributeId, Val
         }
     }
     let key = (
-        EntityId(u64::from_be_bytes(key[0..8].try_into().unwrap())),
+        EntityId::with_value(u64::from_be_bytes(key[0..8].try_into().unwrap())),
         AttributeId::new(u16::from_be_bytes(key[8..10].try_into().unwrap())),
         Value::decode_key(&key[10..key.len() - 8])?,
-        TxnId::new(u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap())),
+        TxnId::with_value(u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap())),
     );
 
     Ok(key)
@@ -204,9 +204,9 @@ pub fn decode_aevt_history_key(key: &[u8]) -> Result<(AttributeId, EntityId, Val
     }
     let key = (
         AttributeId::new(u16::from_be_bytes(key[0..2].try_into().unwrap())),
-        EntityId(u64::from_be_bytes(key[2..10].try_into().unwrap())),
+        EntityId::with_value(u64::from_be_bytes(key[2..10].try_into().unwrap())),
         Value::decode_key(&key[10..key.len() - 8])?,
-        TxnId::new(u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap())),
+        TxnId::with_value(u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap())),
     );
 
     Ok(key)
@@ -226,10 +226,10 @@ pub fn decode_avet_history_key(key: &[u8]) -> Result<(AttributeId, Value, Entity
     let key = (
         AttributeId::new(u16::from_be_bytes(key[0..2].try_into().unwrap())),
         Value::decode_key(&key[2..key.len() - 16])?,
-        EntityId(u64::from_be_bytes(
+        EntityId::with_value(u64::from_be_bytes(
             key[key.len() - 16..key.len() - 8].try_into().unwrap(),
         )),
-        TxnId::new(u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap())),
+        TxnId::with_value(u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap())),
     );
 
     Ok(key)
@@ -250,10 +250,10 @@ pub fn decode_vaet_history_key(key: &[u8]) -> Result<(EntityId, AttributeId, Ent
         }
     }
     let key = (
-        EntityId(u64::from_be_bytes(key[0..8].try_into().unwrap())),
+        EntityId::with_value(u64::from_be_bytes(key[0..8].try_into().unwrap())),
         AttributeId::new(u16::from_be_bytes(key[8..10].try_into().unwrap())),
-        EntityId(u64::from_be_bytes(key[10..18].try_into().unwrap())),
-        TxnId::new(u64::from_be_bytes(key[18..26].try_into().unwrap())),
+        EntityId::with_value(u64::from_be_bytes(key[10..18].try_into().unwrap())),
+        TxnId::with_value(u64::from_be_bytes(key[18..26].try_into().unwrap())),
     );
 
     Ok(key)
@@ -270,8 +270,8 @@ pub fn decode_txlog_key(key: &[u8]) -> Result<(TxnId, EntityId, AttributeId, Val
         }
     }
     let key = (
-        TxnId::new(u64::from_be_bytes(key[0..8].try_into().unwrap())),
-        EntityId(u64::from_be_bytes(key[8..16].try_into().unwrap())),
+        TxnId::with_value(u64::from_be_bytes(key[0..8].try_into().unwrap())),
+        EntityId::with_value(u64::from_be_bytes(key[8..16].try_into().unwrap())),
         AttributeId::new(u16::from_be_bytes(key[16..18].try_into().unwrap())),
         Value::decode_key(&key[18..])?,
     );
@@ -368,7 +368,7 @@ mod tests {
     #[test]
     fn history_round_trips() {
         let (entity, attr, value) = (e(42), AttributeId::new(0x0100), Value::Long(30));
-        let txn = TxnId::new(EntityId::new(SYSTEM_PARTITION, 100).0);
+        let txn = TxnId::new(SYSTEM_PARTITION, 100);
         let region = region(&value);
         assert_eq!(
             decode_eavt_history_key(&eavt_history_key(entity, attr, &region, txn)).unwrap(),
@@ -387,7 +387,7 @@ mod tests {
     #[test]
     fn vaet_history_round_trip() {
         let (target, attr, source) = (e(43), AttributeId::new(0x0102), e(42));
-        let txn = TxnId::new(EntityId::new(SYSTEM_PARTITION, 100).0);
+        let txn = TxnId::new(SYSTEM_PARTITION, 100);
         let key = vaet_history_key(target, attr, source, txn);
         assert_eq!(
             decode_vaet_history_key(&key).unwrap(),
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn txlog_round_trip() {
         let (entity, attr, value) = (e(42), AttributeId::new(0x0100), Value::Bool(true));
-        let txn = TxnId::new(EntityId::new(SYSTEM_PARTITION, 100).0);
+        let txn = TxnId::new(SYSTEM_PARTITION, 100);
         let key = txlog_key(txn, entity, attr, &region(&value));
         assert_eq!(decode_txlog_key(&key).unwrap(), (txn, entity, attr, value));
     }
@@ -439,8 +439,8 @@ mod tests {
     fn history_sorts_by_txn_last() {
         let (entity, attr) = (e(42), AttributeId::new(0x0100));
         let v = region(&Value::Long(30));
-        let t1 = TxnId::new(EntityId::new(SYSTEM_PARTITION, 1).0);
-        let t2 = TxnId::new(EntityId::new(SYSTEM_PARTITION, 2).0);
+        let t1 = TxnId::new(SYSTEM_PARTITION, 1);
+        let t2 = TxnId::new(SYSTEM_PARTITION, 2);
         assert!(eavt_history_key(entity, attr, &v, t1) < eavt_history_key(entity, attr, &v, t2));
     }
 
@@ -448,7 +448,7 @@ mod tests {
     fn prefixes_match_their_keys() {
         let (entity, attr) = (e(42), AttributeId::new(0x0100));
         let v = region(&Value::Long(30));
-        let txn = TxnId::new(EntityId::new(SYSTEM_PARTITION, 1).0);
+        let txn = TxnId::new(SYSTEM_PARTITION, 1);
         assert!(eavt_key(entity, attr, &v).starts_with(&eavt_entity_prefix(entity)));
         assert!(eavt_key(entity, attr, &v).starts_with(&eavt_entity_attr_prefix(entity, attr)));
         assert!(aevt_key(entity, attr, &v).starts_with(&aevt_attr_prefix(attr)));

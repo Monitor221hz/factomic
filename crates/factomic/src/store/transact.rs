@@ -263,7 +263,7 @@ impl<'a> Transaction<'a> {
                             break;
                         }
                         let old_txn =
-                            TxnId::new(u64::from_be_bytes(payload[..8].try_into().unwrap()));
+                            TxnId::with_value(u64::from_be_bytes(payload[..8].try_into().unwrap()));
                         let region =
                             key[size_of::<EntityId>() + size_of::<AttributeId>()..].to_vec();
                         evictions.push((region, old_txn));
@@ -280,7 +280,7 @@ impl<'a> Transaction<'a> {
                         None => plans.push(Plan::Skip),
                         Some(payload) => {
                             let old_txn =
-                                TxnId::new(u64::from_be_bytes(payload[..8].try_into().unwrap()));
+                                TxnId::with_value(u64::from_be_bytes(payload[..8].try_into().unwrap()));
                             plans.push(Plan::Effective {
                                 def,
                                 evictions: vec![(op.region.clone(), old_txn)],

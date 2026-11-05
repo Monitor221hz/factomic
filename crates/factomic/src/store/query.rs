@@ -19,7 +19,7 @@ impl Store {
         for item in self.eavt.prefix(keys::eavt_entity_prefix(entity)) {
             let (key, payload) = item.into_inner()?;
             let (e, a, v) = keys::decode_eavt_key(&key)?;
-            let txn = TxnId::new(u64::from_be_bytes(payload[..8].try_into().unwrap()));
+            let txn = TxnId::with_value(u64::from_be_bytes(payload[..8].try_into().unwrap()));
             factoms.push(Factom::new(e, a, v, txn, Op::Assert));
         }
         Ok(factoms)

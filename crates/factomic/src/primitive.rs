@@ -22,13 +22,13 @@ impl Primitive for EntityId {
 
 impl EncodePrimitive for EntityId {
     fn encode(&self, buf: &mut Vec<u8>) {
-        buf.extend_from_slice(&self.0.to_be_bytes());
+        buf.extend_from_slice(&self.as_u64().to_be_bytes());
     }
 }
 
 impl DecodePrimitive<'_> for EntityId {
     fn decode(bytes: &'_ [u8]) -> Result<Self> {
-        Ok(EntityId(u64::from_be_bytes(
+        Ok(EntityId::with_value(u64::from_be_bytes(
             bytes
                 .try_into()
                 .map_err(|_| Error::CorruptPrimitive(Type::Ref))?,
@@ -332,7 +332,7 @@ mod tests {
 
     #[test]
     fn entity_id_round_trip() {
-        let id = EntityId(42);
+        let id = EntityId::with_value(42);
         assert_eq!(EntityId::decode(&encoded(&id)).unwrap(), id);
         assert!(matches!(
             EntityId::decode(&[0; 7]),
@@ -342,7 +342,7 @@ mod tests {
 
     #[test]
     fn entity_id_encoding_preserves_order() {
-        assert!(encoded(&EntityId(1)) < encoded(&EntityId(2)));
+        assert!(encoded(&EntityId::with_value(1)) < encoded(&EntityId::with_value(2)));
     }
 
     #[test]
