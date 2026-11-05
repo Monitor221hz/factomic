@@ -2,10 +2,17 @@ use std::path::Path;
 
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 
-use crate::core::{self, Error, FIRST_USER_ATTR, Op, SYSTEM_PARTITION, USER_PARTITION};
-use crate::core::{
-    AttributeId, EncodePrimitive, EntityId, Factom, Result, TX_TIMESTAMP_ATTR, TxnId, Type,
+use crate::error::{Error, Result};
+use crate::id::{
+    AttributeId, EntityId, FIRST_USER_ATTR, SYSTEM_PARTITION, TX_TIMESTAMP_ATTR, TxnId,
+    USER_PARTITION,
 };
+use crate::value::{Type, tag_for_type, type_for_tag};
+
+mod query;
+mod transact;
+
+pub use transact::Transaction;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttributeDef {
@@ -17,7 +24,6 @@ pub struct AttributeDef {
 const META_NEXT_ATTR: &[u8; 9] = b"next_attr";
 const META_ENTITY_PREFIX: u8 = 0x02;
 
-#[allow(dead_code)]
 pub struct Store {
     pub(crate) db: Database,
     pub(crate) meta: Keyspace,
@@ -45,7 +51,7 @@ fn by_attr_key(attr_id: AttributeId) -> Vec<u8> {
 #[inline]
 fn by_attr_value(name: &str, value_type: Type, indexed: bool) -> Vec<u8> {
     let mut by_id_value = name.as_bytes().to_vec();
-    by_id_value.push(core::tag_for_type(value_type));
+    by_id_value.push(tag_for_type(value_type));
     by_id_value.push(if indexed { 0x01 } else { 0x00 });
     by_id_value
 }
@@ -62,7 +68,6 @@ fn by_name_value(attr_id: AttributeId) -> [u8; size_of::<AttributeId>()] {
     attr_id.to_be_bytes()
 }
 
-#[allow(dead_code)]
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let db = Database::builder(path).open()?;
@@ -159,7 +164,7 @@ impl Store {
         let flags = payload[payload.len() - 1];
         let indexed = flags & 1 != 0;
 
-        let value_type = core::type_for_tag(payload[payload.len() - 2])?;
+        let value_type = type_for_tag(payload[payload.len() - 2])?;
 
         let name = String::from_utf8(payload[..payload.len() - 2].to_vec())
             .map_err(|_| Error::CorruptPrimitive(Type::String))?;
@@ -188,89 +193,12 @@ impl Store {
     pub fn new_entity(&self) -> Result<EntityId> {
         self.alloc_entity_id(USER_PARTITION)
     }
-
-    pub fn entity_factoms(&self, entity: EntityId) -> Result<Vec<Factom>> {
-        let mut factoms = Vec::new();
-        for item in self.eavt.prefix(crate::keys::eavt_entity_prefix(entity)) {
-            let (key, payload) = item.into_inner()?;
-            let (e, a, v) = crate::keys::decode_eavt_key(&key)?;
-            let txn = TxnId::new(u64::from_be_bytes(payload[..8].try_into().unwrap()));
-            factoms.push(Factom::new(e, a, v, txn, Op::Assert));
-        }
-        Ok(factoms)
-    }
-
-    pub fn entity_history(&self, entity: EntityId) -> Result<Vec<Factom>> {
-        let mut factoms = Vec::new();
-        for item in self.eavt_h.prefix(crate::keys::eavt_entity_prefix(entity)) {
-            let (key, payload) = item.into_inner()?;
-            let (e, a, v, txn) = crate::keys::decode_eavt_history_key(&key)?;
-            let op = Op::from_byte(payload[0])?;
-            factoms.push(Factom::new(e, a, v, txn, op));
-        }
-        Ok(factoms)
-    }
-
-    pub fn entities_with_value<V: EncodePrimitive>(
-        &self,
-        attribute: AttributeId,
-        value: &V,
-    ) -> Result<Vec<EntityId>> {
-        let def = self.attribute_def(attribute)?;
-        if V::TYPE != def.value_type {
-            return Err(Error::TypeMismatch {
-                attribute: def.name.clone(),
-                expected: def.value_type,
-                got: V::TYPE,
-            });
-        }
-        let mut region = vec![core::tag_for_type(V::TYPE)];
-        value.encode(&mut region);
-        let mut entities = Vec::new();
-        for item in self
-            .avet
-            .prefix(crate::keys::avet_value_prefix(attribute, &region))
-        {
-            let (key, _) = item.into_inner()?;
-            let (_, _, entity) = crate::keys::decode_avet_key(&key)?;
-            entities.push(entity);
-        }
-        Ok(entities)
-    }
-
-    pub fn referring_entities(
-        &self,
-        target: EntityId,
-        attribute: AttributeId,
-    ) -> Result<Vec<EntityId>> {
-        let mut entities = Vec::new();
-        for item in self
-            .vaet
-            .prefix(crate::keys::vaet_target_attr_prefix(target, attribute))
-        {
-            let (key, _) = item.into_inner()?;
-            let (_, _, source) = crate::keys::decode_vaet_key(&key)?;
-            entities.push(source);
-        }
-        Ok(entities)
-    }
-
-    pub fn tx_factoms(&self, txn: TxnId) -> Result<Vec<Factom>> {
-        let mut factoms = Vec::new();
-        for item in self.txlog.prefix(crate::keys::txlog_prefix(txn)) {
-            let (key, payload) = item.into_inner()?;
-            let (txn, entity, attribute, value) = crate::keys::decode_txlog_key(&key)?;
-            let op = Op::from_byte(payload[0])?;
-            factoms.push(Factom::new(entity, attribute, value, txn, op));
-        }
-        Ok(factoms)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{Error, USER_PARTITION};
+    use crate::id::USER_PARTITION;
     use tempfile::TempDir;
 
     fn temp_store() -> (TempDir, Store) {

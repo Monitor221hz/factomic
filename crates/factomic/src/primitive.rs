@@ -1,6 +1,20 @@
 use jiff::Timestamp;
 
-use crate::core::{DecodePrimitive, EncodePrimitive, EntityId, Error, Primitive, Result, Type};
+use crate::error::{Error, Result};
+use crate::id::EntityId;
+use crate::value::Type;
+
+pub trait Primitive: Sized {
+    const TYPE: Type;
+}
+
+pub trait EncodePrimitive: Primitive {
+    fn encode(&self, buf: &mut Vec<u8>);
+}
+
+pub trait DecodePrimitive<'a>: Sized + Primitive {
+    fn decode(bytes: &'a [u8]) -> Result<Self>;
+}
 
 impl Primitive for EntityId {
     const TYPE: Type = Type::Ref;
@@ -42,11 +56,13 @@ impl DecodePrimitive<'_> for Timestamp {
 impl Primitive for bool {
     const TYPE: Type = Type::Bool;
 }
+
 impl EncodePrimitive for bool {
     fn encode(&self, buf: &mut Vec<u8>) {
         buf.push(*self as u8);
     }
 }
+
 impl DecodePrimitive<'_> for bool {
     fn decode(bytes: &'_ [u8]) -> Result<Self> {
         match bytes {
@@ -60,6 +76,7 @@ impl DecodePrimitive<'_> for bool {
 impl Primitive for i64 {
     const TYPE: Type = Type::Long;
 }
+
 impl EncodePrimitive for i64 {
     fn encode(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&(*self as u64 ^ 1 << 63).to_be_bytes());
@@ -79,6 +96,7 @@ impl DecodePrimitive<'_> for i64 {
 impl Primitive for f64 {
     const TYPE: Type = Type::Double;
 }
+
 impl EncodePrimitive for f64 {
     fn encode(&self, buf: &mut Vec<u8>) {
         let bits = self.to_bits();
@@ -132,6 +150,7 @@ impl EncodePrimitive for String {
         buf.extend_from_slice(self.as_bytes());
     }
 }
+
 impl DecodePrimitive<'_> for String {
     fn decode(bytes: &'_ [u8]) -> Result<Self> {
         Ok(str::from_utf8(bytes)

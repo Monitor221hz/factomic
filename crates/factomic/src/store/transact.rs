@@ -1,12 +1,13 @@
 use fjall::OwnedWriteBatch;
 use jiff::Timestamp;
 
-use crate::core::{
-    ASSERT, AttributeId, DecodePrimitive, EncodePrimitive, EntityId, Error, Op, RETRACT, Result,
-    TAG_REF, TX_TIMESTAMP_ATTR, TxnId, Type, Value, tag_for_type,
-};
+use crate::error::{Error, Result};
+use crate::factom::{ASSERT, Op, RETRACT};
+use crate::id::{AttributeId, EntityId, TX_TIMESTAMP_ATTR, TxnId};
 use crate::keys;
+use crate::primitive::{DecodePrimitive, EncodePrimitive};
 use crate::store::{AttributeDef, Store};
+use crate::value::{TAG_REF, Type, Value, tag_for_type};
 
 fn encode_region<V: EncodePrimitive>(value: &V) -> Vec<u8> {
     let mut region = vec![tag_for_type(V::TYPE)];
@@ -336,60 +337,62 @@ impl<'a> Transaction<'a> {
     }
 }
 
-pub fn assert<V: EncodePrimitive>(
-    store: &Store,
-    entity: EntityId,
-    attr: AttributeId,
-    value: &V,
-) -> Result<Option<TxnId>> {
-    store.transact().assert(entity, attr, value).commit()
-}
-
-pub fn assert_value(
-    store: &Store,
-    entity: EntityId,
-    attr: AttributeId,
-    value: &Value,
-) -> Result<Option<TxnId>> {
-    store.transact().assert_value(entity, attr, value).commit()
-}
-
-pub fn retract<V: EncodePrimitive>(
-    store: &Store,
-    entity: EntityId,
-    attr: AttributeId,
-    value: &V,
-) -> Result<Option<TxnId>> {
-    store.transact().retract(entity, attr, value).commit()
-}
-
-pub fn retract_value(
-    store: &Store,
-    entity: EntityId,
-    attr: AttributeId,
-    value: &Value,
-) -> Result<Option<TxnId>> {
-    store.transact().retract_value(entity, attr, value).commit()
-}
-
-pub fn revert_txn(store: &Store, txn: TxnId) -> Result<Option<TxnId>> {
-    let mut tx = store.transact();
-    for factom in store.tx_factoms(txn)? {
-        if factom.attribute() == TX_TIMESTAMP_ATTR {
-            continue;
-        }
-        tx = match factom.op() {
-            Op::Assert => tx.retract_value(factom.entity(), factom.attribute(), factom.value()),
-            Op::Retract => tx.assert_value(factom.entity(), factom.attribute(), factom.value()),
-        };
+impl Store {
+    pub fn assert<V: EncodePrimitive>(
+        &self,
+        entity: EntityId,
+        attr: AttributeId,
+        value: &V,
+    ) -> Result<Option<TxnId>> {
+        self.transact().assert(entity, attr, value).commit()
     }
-    tx.commit()
+
+    pub fn assert_value(
+        &self,
+        entity: EntityId,
+        attr: AttributeId,
+        value: &Value,
+    ) -> Result<Option<TxnId>> {
+        self.transact().assert_value(entity, attr, value).commit()
+    }
+
+    pub fn retract<V: EncodePrimitive>(
+        &self,
+        entity: EntityId,
+        attr: AttributeId,
+        value: &V,
+    ) -> Result<Option<TxnId>> {
+        self.transact().retract(entity, attr, value).commit()
+    }
+
+    pub fn retract_value(
+        &self,
+        entity: EntityId,
+        attr: AttributeId,
+        value: &Value,
+    ) -> Result<Option<TxnId>> {
+        self.transact().retract_value(entity, attr, value).commit()
+    }
+
+    pub fn revert_txn(&self, txn: TxnId) -> Result<Option<TxnId>> {
+        let mut tx = self.transact();
+        for factom in self.tx_factoms(txn)? {
+            if factom.attribute() == TX_TIMESTAMP_ATTR {
+                continue;
+            }
+            tx = match factom.op() {
+                Op::Assert => tx.retract_value(factom.entity(), factom.attribute(), factom.value()),
+                Op::Retract => tx.assert_value(factom.entity(), factom.attribute(), factom.value()),
+            };
+        }
+        tx.commit()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{Factom, Op, TX_TIMESTAMP_ATTR, Type, Value};
+    use crate::factom::Factom;
     use tempfile::TempDir;
 
     fn temp_store() -> (TempDir, Store) {
@@ -405,7 +408,7 @@ mod tests {
             .declare_attribute("person/name", Type::String, false)
             .unwrap();
         let e = store.new_entity().unwrap();
-        let txn = assert(&store, e, name, &"alice").unwrap().unwrap();
+        let txn = store.assert(e, name, &"alice").unwrap().unwrap();
         let factoms = store.entity_factoms(e).unwrap();
         assert_eq!(factoms.len(), 1);
         assert_eq!(factoms[0].entity(), e);
@@ -422,8 +425,8 @@ mod tests {
             .declare_attribute("person/name", Type::String, false)
             .unwrap();
         let e = store.new_entity().unwrap();
-        assert(&store, e, name, &"alice").unwrap().unwrap();
-        let second = assert(&store, e, name, &"alice").unwrap();
+        store.assert(e, name, &"alice").unwrap().unwrap();
+        let second = store.assert(e, name, &"alice").unwrap();
         assert_eq!(second, None);
         assert_eq!(store.entity_factoms(e).unwrap().len(), 1);
     }
@@ -435,8 +438,8 @@ mod tests {
             .declare_attribute("person/name", Type::String, false)
             .unwrap();
         let e = store.new_entity().unwrap();
-        let txn1 = assert(&store, e, name, &"alice").unwrap().unwrap();
-        let txn2 = assert(&store, e, name, &"bob").unwrap().unwrap();
+        let txn1 = store.assert(e, name, &"alice").unwrap().unwrap();
+        let txn2 = store.assert(e, name, &"bob").unwrap().unwrap();
         let current = store.entity_factoms(e).unwrap();
         assert_eq!(current.len(), 1);
         assert_eq!(current[0].value(), &Value::String("bob".into()));
@@ -464,8 +467,8 @@ mod tests {
             .declare_attribute("person/name", Type::String, false)
             .unwrap();
         let e = store.new_entity().unwrap();
-        let txn1 = assert(&store, e, name, &"alice").unwrap().unwrap();
-        let txn2 = retract(&store, e, name, &"alice").unwrap().unwrap();
+        let txn1 = store.assert(e, name, &"alice").unwrap().unwrap();
+        let txn2 = store.retract(e, name, &"alice").unwrap().unwrap();
         assert!(store.entity_factoms(e).unwrap().is_empty());
         let history = store.entity_history(e).unwrap();
         assert!(history.contains(&Factom::new(
@@ -491,7 +494,7 @@ mod tests {
             .declare_attribute("person/name", Type::String, false)
             .unwrap();
         let e = store.new_entity().unwrap();
-        assert_eq!(retract(&store, e, name, &"nobody").unwrap(), None);
+        assert_eq!(store.retract(e, name, &"nobody").unwrap(), None);
     }
 
     #[test]
@@ -501,11 +504,8 @@ mod tests {
             .declare_attribute("person/age", Type::Long, false)
             .unwrap();
         let e = store.new_entity().unwrap();
-        let result = assert(&store, e, age, &"thirty");
-        assert!(matches!(
-            result,
-            Err(crate::core::Error::TypeMismatch { .. })
-        ));
+        let result = store.assert(e, age, &"thirty");
+        assert!(matches!(result, Err(Error::TypeMismatch { .. })));
     }
 
     #[test]
@@ -515,7 +515,7 @@ mod tests {
             .declare_attribute("person/age", Type::Long, true)
             .unwrap();
         let e = store.new_entity().unwrap();
-        assert(&store, e, age, &30i64).unwrap();
+        store.assert(e, age, &30i64).unwrap();
         assert_eq!(store.entities_with_value(age, &30i64).unwrap(), vec![e]);
         assert!(store.entities_with_value(age, &31i64).unwrap().is_empty());
     }
@@ -528,7 +528,7 @@ mod tests {
             .unwrap();
         let a = store.new_entity().unwrap();
         let b = store.new_entity().unwrap();
-        assert(&store, a, friend, &b).unwrap();
+        store.assert(a, friend, &b).unwrap();
         assert_eq!(store.referring_entities(b, friend).unwrap(), vec![a]);
         assert!(store.referring_entities(a, friend).unwrap().is_empty());
     }
@@ -540,7 +540,7 @@ mod tests {
             .declare_attribute("person/name", Type::String, false)
             .unwrap();
         let e = store.new_entity().unwrap();
-        let txn = assert(&store, e, name, &"alice").unwrap().unwrap();
+        let txn = store.assert(e, name, &"alice").unwrap().unwrap();
         let datoms = store.tx_factoms(txn).unwrap();
         assert_eq!(datoms.len(), 2);
         assert!(
@@ -562,9 +562,9 @@ mod tests {
             .declare_attribute("person/name", Type::String, false)
             .unwrap();
         let e = store.new_entity().unwrap();
-        let txn1 = assert(&store, e, name, &"alice").unwrap().unwrap();
+        let txn1 = store.assert(e, name, &"alice").unwrap().unwrap();
 
-        let reverted = revert_txn(&store, txn1).unwrap().unwrap();
+        let reverted = store.revert_txn(txn1).unwrap().unwrap();
         assert!(store.entity_factoms(e).unwrap().is_empty());
 
         let history = store.entity_history(e).unwrap();
@@ -591,10 +591,10 @@ mod tests {
             .declare_attribute("person/name", Type::String, false)
             .unwrap();
         let e = store.new_entity().unwrap();
-        assert(&store, e, name, &"alice").unwrap().unwrap();
-        let txn2 = assert(&store, e, name, &"bob").unwrap().unwrap();
+        store.assert(e, name, &"alice").unwrap().unwrap();
+        let txn2 = store.assert(e, name, &"bob").unwrap().unwrap();
 
-        revert_txn(&store, txn2).unwrap();
+        store.revert_txn(txn2).unwrap();
         let current = store.entity_factoms(e).unwrap();
         assert_eq!(current.len(), 1);
         assert_eq!(current[0].value(), &Value::String("alice".into()));
@@ -607,10 +607,10 @@ mod tests {
             .declare_attribute("person/name", Type::String, false)
             .unwrap();
         let e = store.new_entity().unwrap();
-        assert(&store, e, name, &"alice").unwrap().unwrap();
-        let txn2 = retract(&store, e, name, &"alice").unwrap().unwrap();
+        store.assert(e, name, &"alice").unwrap().unwrap();
+        let txn2 = store.retract(e, name, &"alice").unwrap().unwrap();
 
-        revert_txn(&store, txn2).unwrap();
+        store.revert_txn(txn2).unwrap();
         let current = store.entity_factoms(e).unwrap();
         assert_eq!(current.len(), 1);
         assert_eq!(current[0].value(), &Value::String("alice".into()));
@@ -623,9 +623,9 @@ mod tests {
             .declare_attribute("person/name", Type::String, false)
             .unwrap();
         let e = store.new_entity().unwrap();
-        let txn1 = assert(&store, e, name, &"alice").unwrap().unwrap();
+        let txn1 = store.assert(e, name, &"alice").unwrap().unwrap();
 
-        revert_txn(&store, txn1).unwrap();
+        store.revert_txn(txn1).unwrap();
         assert_eq!(store.entity_factoms(txn1.entity_id()).unwrap().len(), 1);
     }
 
@@ -659,7 +659,7 @@ mod tests {
             .declare_attribute("person/name", Type::String, false)
             .unwrap();
         let e = store.new_entity().unwrap();
-        assert(&store, e, name, &"alice").unwrap().unwrap();
+        store.assert(e, name, &"alice").unwrap().unwrap();
         let result = store
             .transact()
             .assert(e, name, &"alice")
@@ -679,7 +679,7 @@ mod tests {
             .declare_attribute("person/age", Type::Long, false)
             .unwrap();
         let e = store.new_entity().unwrap();
-        assert(&store, e, name, &"alice").unwrap().unwrap();
+        store.assert(e, name, &"alice").unwrap().unwrap();
         let txn = store
             .transact()
             .assert(e, name, &"alice")
@@ -713,7 +713,7 @@ mod tests {
             .commit()
             .unwrap()
             .unwrap();
-        let reverted = revert_txn(&store, txn1).unwrap().unwrap();
+        let reverted = store.revert_txn(txn1).unwrap().unwrap();
         assert!(store.entity_factoms(e).unwrap().is_empty());
         let logged = store.tx_factoms(reverted).unwrap();
         assert_eq!(logged.len(), 3);

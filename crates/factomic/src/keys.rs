@@ -1,4 +1,6 @@
-use crate::core::{AttributeId, EntityId, Error, Result, TxnId, Value};
+use crate::error::{Error, Result};
+use crate::id::{AttributeId, EntityId, TxnId};
+use crate::value::Value;
 
 pub fn eavt_key(e: EntityId, a: AttributeId, v: &[u8]) -> Vec<u8> {
     let mut key = Vec::with_capacity(size_of::<EntityId>() + size_of::<AttributeId>() + v.len());
@@ -111,6 +113,7 @@ pub fn decode_eavt_key(key: &[u8]) -> Result<(EntityId, AttributeId, Value)> {
     Ok(key)
 }
 
+#[allow(dead_code)]
 pub fn decode_aevt_key(key: &[u8]) -> Result<(AttributeId, EntityId, Value)> {
     {
         let lim = size_of::<AttributeId>() + size_of::<EntityId>() + 1;
@@ -188,6 +191,7 @@ pub fn decode_eavt_history_key(key: &[u8]) -> Result<(EntityId, AttributeId, Val
     Ok(key)
 }
 
+#[allow(dead_code)]
 pub fn decode_aevt_history_key(key: &[u8]) -> Result<(AttributeId, EntityId, Value, TxnId)> {
     {
         let lim = size_of::<AttributeId>() + size_of::<EntityId>() + 1 + size_of::<TxnId>();
@@ -208,6 +212,7 @@ pub fn decode_aevt_history_key(key: &[u8]) -> Result<(AttributeId, EntityId, Val
     Ok(key)
 }
 
+#[allow(dead_code)]
 pub fn decode_avet_history_key(key: &[u8]) -> Result<(AttributeId, Value, EntityId, TxnId)> {
     {
         let lim = size_of::<AttributeId>() + 1 + size_of::<EntityId>() + size_of::<TxnId>();
@@ -230,6 +235,7 @@ pub fn decode_avet_history_key(key: &[u8]) -> Result<(AttributeId, Value, Entity
     Ok(key)
 }
 
+#[allow(dead_code)]
 pub fn decode_vaet_history_key(key: &[u8]) -> Result<(EntityId, AttributeId, EntityId, TxnId)> {
     {
         let lim = size_of::<EntityId>()
@@ -283,6 +289,7 @@ pub fn eavt_entity_attr_prefix(e: EntityId, a: AttributeId) -> Vec<u8> {
     prefix
 }
 
+#[allow(dead_code)]
 pub fn aevt_attr_prefix(a: AttributeId) -> Vec<u8> {
     a.to_be_bytes().to_vec()
 }
@@ -314,7 +321,7 @@ pub fn txlog_prefix(t: TxnId) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{SYSTEM_PARTITION, USER_PARTITION};
+    use crate::id::{SYSTEM_PARTITION, USER_PARTITION};
 
     fn e(index: u64) -> EntityId {
         EntityId::new(USER_PARTITION, index)
