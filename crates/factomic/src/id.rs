@@ -10,6 +10,8 @@ pub struct TxnId(u64);
 pub(crate) const SYSTEM_PARTITION: u8 = 0x01;
 pub(crate) const USER_PARTITION: u8 = 0x02;
 pub(crate) const TX_TIMESTAMP_ATTR: AttributeId = AttributeId(0x0001);
+pub(crate) const TX_MOVE_ATTR: AttributeId = AttributeId(0x0002);
+pub(crate) const TX_KIND_ATTR: AttributeId = AttributeId(0x0003);
 pub(crate) const FIRST_USER_ATTR: u16 = 0x0100;
 
 impl EntityId {

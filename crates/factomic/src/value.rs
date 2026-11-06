@@ -20,9 +20,9 @@ pub enum Type {
 }
 
 const TAG_BOOL: u8 = 0x01;
-const TAG_LONG: u8 = 0x02;
+pub(crate) const TAG_LONG: u8 = 0x02;
 const TAG_DOUBLE: u8 = 0x03;
-const TAG_STRING: u8 = 0x04;
+pub(crate) const TAG_STRING: u8 = 0x04;
 const TAG_BYTES: u8 = 0x05;
 pub(crate) const TAG_REF: u8 = 0x06;
 const TAG_INSTANT: u8 = 0x07;

@@ -3,9 +3,10 @@ use std::path::Path;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 
 use crate::error::{Error, Result};
+use crate::factom::CollectionKind;
 use crate::id::{
-    AttributeId, EntityId, FIRST_USER_ATTR, SYSTEM_PARTITION, TX_TIMESTAMP_ATTR, TxnId,
-    USER_PARTITION,
+    AttributeId, EntityId, FIRST_USER_ATTR, SYSTEM_PARTITION, TX_KIND_ATTR, TX_MOVE_ATTR,
+    TX_TIMESTAMP_ATTR, TxnId, USER_PARTITION,
 };
 use crate::value::{Type, tag_for_type, type_for_tag};
 
@@ -18,7 +19,10 @@ pub use transact::Transaction;
 pub struct AttributeDef {
     pub name: String,
     pub value_type: Type,
+    pub kind: CollectionKind,
+    pub key_type: Option<Type>,
     pub indexed: bool,
+    pub is_component: bool,
 }
 
 const META_NEXT_ATTR: &[u8; 9] = b"next_attr";
@@ -28,14 +32,14 @@ pub struct Store {
     pub(crate) db: Database,
     pub(crate) meta: Keyspace,
     pub(crate) attrs: Keyspace,
-    pub(crate) eavt: Keyspace,
-    pub(crate) aevt: Keyspace,
-    pub(crate) avet: Keyspace,
-    pub(crate) vaet: Keyspace,
-    pub(crate) eavt_h: Keyspace,
-    pub(crate) aevt_h: Keyspace,
-    pub(crate) avet_h: Keyspace,
-    pub(crate) vaet_h: Keyspace,
+    pub(crate) easvt: Keyspace,
+    pub(crate) aesvt: Keyspace,
+    pub(crate) avest: Keyspace,
+    pub(crate) vaest: Keyspace,
+    pub(crate) easvt_h: Keyspace,
+    pub(crate) aesvt_h: Keyspace,
+    pub(crate) avest_h: Keyspace,
+    pub(crate) vaest_h: Keyspace,
     pub(crate) txlog: Keyspace,
 }
 const BY_NAME_PREFIX: u8 = 0x01; // -> attr id
@@ -43,22 +47,27 @@ const BY_ATTR_PREFIX: u8 = 0x02; // -> name, tag, flags
 
 #[inline]
 fn by_attr_key(attr_id: AttributeId) -> Vec<u8> {
-    let mut by_id_key = vec![BY_ATTR_PREFIX];
+    let mut by_id_key = Vec::with_capacity(1 + size_of::<AttributeId>());
+    by_id_key.push(BY_ATTR_PREFIX);
     by_id_key.extend_from_slice(&attr_id.to_be_bytes());
     by_id_key
 }
 
 #[inline]
-fn by_attr_value(name: &str, value_type: Type, indexed: bool) -> Vec<u8> {
-    let mut by_id_value = name.as_bytes().to_vec();
-    by_id_value.push(tag_for_type(value_type));
-    by_id_value.push(if indexed { 0x01 } else { 0x00 });
+fn by_attr_value(def: &AttributeDef) -> Vec<u8> {
+    let mut by_id_value = Vec::with_capacity(def.name.len() + 4);
+    by_id_value.extend_from_slice(def.name.as_bytes());
+    by_id_value.push(tag_for_type(def.value_type));
+    by_id_value.push(def.indexed as u8 | (def.is_component as u8) << 1);
+    by_id_value.push(def.kind.to_byte());
+    by_id_value.push(def.key_type.map_or(0x00, tag_for_type));
     by_id_value
 }
 
 #[inline]
 fn by_name_key(name: &str) -> Vec<u8> {
-    let mut by_name_key = vec![BY_NAME_PREFIX];
+    let mut by_name_key = Vec::with_capacity(1 + name.len());
+    by_name_key.push(BY_NAME_PREFIX);
     by_name_key.extend_from_slice(name.as_bytes());
     by_name_key
 }
@@ -73,27 +82,27 @@ impl Store {
         let db = Database::builder(path).open()?;
         let meta = db.keyspace("meta", KeyspaceCreateOptions::default)?;
         let attrs = db.keyspace("attrs", KeyspaceCreateOptions::default)?;
-        let eavt = db.keyspace("eavt", KeyspaceCreateOptions::default)?;
-        let aevt = db.keyspace("aevt", KeyspaceCreateOptions::default)?;
-        let avet = db.keyspace("avet", KeyspaceCreateOptions::default)?;
-        let vaet = db.keyspace("vaet", KeyspaceCreateOptions::default)?;
-        let eavt_h = db.keyspace("eavt_h", KeyspaceCreateOptions::default)?;
-        let aevt_h = db.keyspace("aevt_h", KeyspaceCreateOptions::default)?;
-        let avet_h = db.keyspace("avet_h", KeyspaceCreateOptions::default)?;
-        let vaet_h = db.keyspace("vaet_h", KeyspaceCreateOptions::default)?;
+        let easvt = db.keyspace("easvt", KeyspaceCreateOptions::default)?;
+        let aesvt = db.keyspace("aesvt", KeyspaceCreateOptions::default)?;
+        let avest = db.keyspace("avest", KeyspaceCreateOptions::default)?;
+        let vaest = db.keyspace("vaest", KeyspaceCreateOptions::default)?;
+        let easvt_h = db.keyspace("easvt_h", KeyspaceCreateOptions::default)?;
+        let aesvt_h = db.keyspace("aesvt_h", KeyspaceCreateOptions::default)?;
+        let avest_h = db.keyspace("avest_h", KeyspaceCreateOptions::default)?;
+        let vaest_h = db.keyspace("vaest_h", KeyspaceCreateOptions::default)?;
         let txlog = db.keyspace("txlog", KeyspaceCreateOptions::default)?;
         let store = Store {
             db,
             meta,
             attrs,
-            eavt,
-            aevt,
-            avet,
-            vaet,
-            eavt_h,
-            aevt_h,
-            avet_h,
-            vaet_h,
+            easvt,
+            aesvt,
+            avest,
+            vaest,
+            easvt_h,
+            aesvt_h,
+            avest_h,
+            vaest_h,
             txlog,
         };
         store.sync_system_attributes()?;
@@ -101,33 +110,66 @@ impl Store {
     }
 
     fn sync_system_attributes(&self) -> Result<()> {
-        let by_id_key = by_attr_key(TX_TIMESTAMP_ATTR);
-        if self.attrs.get(&by_id_key)?.is_some() {
-            return Ok(());
+        let system_attrs = [
+            AttributeDef {
+                name: "db/txTimestamp".into(),
+                value_type: Type::Timestamp,
+                kind: CollectionKind::One,
+                key_type: None,
+                indexed: false,
+                is_component: false,
+            },
+            AttributeDef {
+                name: "db/txMove".into(),
+                value_type: Type::Bytes,
+                kind: CollectionKind::Many,
+                key_type: None,
+                indexed: false,
+                is_component: false,
+            },
+            AttributeDef {
+                name: "db/txKind".into(),
+                value_type: Type::String,
+                kind: CollectionKind::One,
+                key_type: None,
+                indexed: false,
+                is_component: false,
+            },
+        ];
+        let ids = [TX_TIMESTAMP_ATTR, TX_MOVE_ATTR, TX_KIND_ATTR];
+        for (id, def) in ids.into_iter().zip(system_attrs) {
+            let by_id_key = by_attr_key(id);
+            if self.attrs.get(&by_id_key)?.is_some() {
+                continue;
+            }
+            self.attrs
+                .insert(by_name_key(&def.name), by_name_value(id))?;
+            self.attrs.insert(by_id_key, by_attr_value(&def))?;
         }
-        let name = "db/txTimestamp";
-        self.attrs
-            .insert(by_name_key(name), by_name_value(TX_TIMESTAMP_ATTR))?;
-
-        self.attrs
-            .insert(by_id_key, by_attr_value(name, Type::Timestamp, false))?;
         Ok(())
     }
 
-    pub fn declare_attribute(
-        &self,
-        name: &str,
-        value_type: Type,
-        indexed: bool,
-    ) -> Result<AttributeId> {
-        let mut by_name_key = vec![BY_NAME_PREFIX];
-        by_name_key.extend_from_slice(name.as_bytes());
+    pub fn declare_attribute(&self, def: AttributeDef) -> Result<AttributeId> {
+        let valid_key_type = match def.kind {
+            CollectionKind::Map => {
+                matches!(def.key_type, Some(Type::String | Type::Long | Type::Ref))
+            }
+            _ => def.key_type.is_none(),
+        };
+        if !valid_key_type {
+            return Err(Error::InvalidKeyType(def.name));
+        }
+        if def.is_component && def.value_type != Type::Ref {
+            return Err(Error::InvalidSchema(def.name));
+        }
+
+        let by_name_key = by_name_key(&def.name);
 
         let attribute_id = if let Some(id_bytes) = self.attrs.get(&by_name_key)? {
             let id = AttributeId::new(u16::from_be_bytes(id_bytes[..2].try_into().unwrap()));
-            let def = self.attribute_def(id)?;
-            if def.value_type != value_type {
-                return Err(Error::SchemaConflict(name.to_string()));
+            let existing = self.attribute_def(id)?;
+            if existing.value_type != def.value_type {
+                return Err(Error::SchemaConflict(def.name));
             }
             id
         } else {
@@ -144,8 +186,7 @@ impl Store {
         self.attrs
             .insert(&by_name_key, attribute_id.to_be_bytes())?;
         let by_id_key = by_attr_key(attribute_id);
-        self.attrs
-            .insert(by_id_key, by_attr_value(name, value_type, indexed))?;
+        self.attrs.insert(by_id_key, by_attr_value(&def))?;
         Ok(attribute_id)
     }
 
@@ -155,24 +196,33 @@ impl Store {
             .get(by_attr_key(id))?
             .ok_or_else(|| Error::UnknownAttribute(format!("{id:?}")))?;
 
-        if payload.len() < 2 {
+        if payload.len() < 4 {
             return Err(Error::CorruptKey {
-                expected: 2,
+                expected: 4,
                 got: payload.len(),
             });
         }
-        let flags = payload[payload.len() - 1];
+        let key_type = match payload[payload.len() - 1] {
+            0x00 => None,
+            tag => Some(type_for_tag(tag)?),
+        };
+        let kind = CollectionKind::try_from(payload[payload.len() - 2])?;
+        let flags = payload[payload.len() - 3];
         let indexed = flags & 1 != 0;
+        let is_component = flags & 0b10 != 0;
 
-        let value_type = type_for_tag(payload[payload.len() - 2])?;
+        let value_type = type_for_tag(payload[payload.len() - 4])?;
 
-        let name = String::from_utf8(payload[..payload.len() - 2].to_vec())
+        let name = String::from_utf8(payload[..payload.len() - 4].to_vec())
             .map_err(|_| Error::CorruptPrimitive(Type::String))?;
 
         Ok(AttributeDef {
             name,
             value_type,
+            kind,
+            key_type,
             indexed,
+            is_component,
         })
     }
 
@@ -209,11 +259,22 @@ mod tests {
         (dir, store)
     }
 
+    fn def(name: &str, value_type: Type, kind: CollectionKind) -> AttributeDef {
+        AttributeDef {
+            name: name.into(),
+            value_type,
+            kind,
+            key_type: None,
+            indexed: false,
+            is_component: false,
+        }
+    }
+
     #[test]
     fn declare_and_reload_def() {
         let (_dir, store) = temp_store();
         let id = store
-            .declare_attribute("person/name", Type::String, false)
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
             .unwrap();
         let def = store.attribute_def(id).unwrap();
         assert_eq!(def.name, "person/name");
@@ -225,10 +286,10 @@ mod tests {
     fn declare_twice_returns_same_id() {
         let (_dir, store) = temp_store();
         let first = store
-            .declare_attribute("person/name", Type::String, false)
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
             .unwrap();
         let second = store
-            .declare_attribute("person/name", Type::String, false)
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
             .unwrap();
         assert_eq!(first, second);
     }
@@ -237,23 +298,23 @@ mod tests {
     fn declare_conflicting_type_errors() {
         let (_dir, store) = temp_store();
         store
-            .declare_attribute("person/name", Type::String, false)
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
             .unwrap();
-        let result = store.declare_attribute("person/name", Type::Long, false);
+        let result = store.declare_attribute(def("person/name", Type::Long, CollectionKind::One));
         assert!(matches!(result, Err(Error::SchemaConflict(_))));
     }
 
     #[test]
     fn registry_survives_reopen() {
         let (dir, store) = temp_store();
-        let id = store
-            .declare_attribute("person/age", Type::Long, true)
-            .unwrap();
+        let schema = AttributeDef {
+            indexed: true,
+            ..def("person/age", Type::Long, CollectionKind::One)
+        };
+        let id = store.declare_attribute(schema.clone()).unwrap();
         drop(store);
         let reopened = Store::open(dir.path()).unwrap();
-        let again = reopened
-            .declare_attribute("person/age", Type::Long, true)
-            .unwrap();
+        let again = reopened.declare_attribute(schema).unwrap();
         assert_eq!(id, again);
         assert!(reopened.attribute_def(id).unwrap().indexed);
     }

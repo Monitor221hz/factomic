@@ -9,7 +9,7 @@ mod store;
 mod value;
 
 pub use error::{Error, Result};
-pub use factom::{Factom, Op};
+pub use factom::{CollectionKind, Factom, MapKey, Op, Slot};
 pub use id::{AttributeId, EntityId, TxnId};
 pub use primitive::{DecodePrimitive, EncodePrimitive, Primitive};
 pub use store::{AttributeDef, Store, Transaction};

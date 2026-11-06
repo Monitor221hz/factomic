@@ -1,35 +1,54 @@
 use std::collections::HashMap;
 
 use crate::error::{Error, Result};
-use crate::factom::{Factom, Op};
+use crate::factom::{Factom, Op, Slot};
 use crate::id::{AttributeId, EntityId, TxnId};
 use crate::primitive::EncodePrimitive;
 use crate::store::Store;
 use crate::value::tag_for_type;
 use crate::{Value, keys};
 
+// todo: support slots
 pub struct EntityView {
     id: EntityId,
     map: HashMap<u16, Value>,
 }
 
 impl Store {
+    pub fn slot_at(
+        &self,
+        entity: EntityId,
+        attr: AttributeId,
+        ordinal: usize,
+    ) -> Result<Option<Slot>> {
+        let Some(guard) = self
+            .easvt
+            .prefix(keys::easvt_entity_attr_prefix(entity, attr))
+            .nth(ordinal)
+        else {
+            return Ok(None);
+        };
+        let (key, _) = guard.into_inner()?;
+        let (slot, _) = Slot::decode_key(&key[size_of::<EntityId>() + size_of::<AttributeId>()..])?;
+        Ok(Some(slot))
+    }
+
     pub fn entity_factoms(&self, entity: EntityId) -> Result<Vec<Factom>> {
         let mut factoms = Vec::new();
-        for item in self.eavt.prefix(keys::eavt_entity_prefix(entity)) {
+        for item in self.easvt.prefix(keys::easvt_entity_prefix(entity)) {
             let (key, payload) = item.into_inner()?;
-            let (e, a, v) = keys::decode_eavt_key(&key)?;
+            let (e, a, k, v) = keys::decode_easvt_key(&key)?;
             let txn = TxnId::with_value(u64::from_be_bytes(payload[..8].try_into().unwrap()));
-            factoms.push(Factom::new(e, a, v, txn, Op::Assert));
+            factoms.push(Factom::new(e, a, k, v, txn, Op::Assert));
         }
         Ok(factoms)
     }
 
     pub fn entity(&self, entity: EntityId) -> Result<EntityView> {
         let mut map: HashMap<u16, Value> = HashMap::new();
-        for item in self.eavt.prefix(keys::eavt_entity_prefix(entity)) {
+        for item in self.easvt.prefix(keys::easvt_entity_prefix(entity)) {
             let (key, _) = item.into_inner()?;
-            let (_, a, v) = keys::decode_eavt_key(&key)?;
+            let (_, a, _, v) = keys::decode_easvt_key(&key)?;
             map.insert(a.as_u16(), v);
         }
         Ok(EntityView { id: entity, map })
@@ -37,11 +56,11 @@ impl Store {
 
     pub fn entity_history(&self, entity: EntityId) -> Result<Vec<Factom>> {
         let mut factoms = Vec::new();
-        for item in self.eavt_h.prefix(keys::eavt_entity_prefix(entity)) {
+        for item in self.easvt_h.prefix(keys::easvt_entity_prefix(entity)) {
             let (key, payload) = item.into_inner()?;
-            let (e, a, v, txn) = keys::decode_eavt_history_key(&key)?;
-            let op = Op::from_byte(payload[0])?;
-            factoms.push(Factom::new(e, a, v, txn, op));
+            let (e, a, k, v, txn) = keys::decode_easvt_history_key(&key)?;
+            let op = Op::try_from(payload[0])?;
+            factoms.push(Factom::new(e, a, k, v, txn, op));
         }
         Ok(factoms)
     }
@@ -59,15 +78,16 @@ impl Store {
                 got: V::TYPE,
             });
         }
-        let mut region = vec![tag_for_type(V::TYPE)];
+        let mut region = Vec::with_capacity(9);
+        region.push(tag_for_type(V::TYPE));
         value.encode(&mut region);
         let mut entities = Vec::new();
         for item in self
-            .avet
-            .prefix(keys::avet_value_prefix(attribute, &region))
+            .avest
+            .prefix(keys::avest_value_prefix(attribute, &region))
         {
             let (key, _) = item.into_inner()?;
-            let (_, _, entity) = keys::decode_avet_key(&key)?;
+            let (_, _, entity, _) = keys::decode_avest_key(&key)?;
             entities.push(entity);
         }
         Ok(entities)
@@ -80,11 +100,11 @@ impl Store {
     ) -> Result<Vec<EntityId>> {
         let mut entities = Vec::new();
         for item in self
-            .vaet
-            .prefix(keys::vaet_target_attr_prefix(target, attribute))
+            .vaest
+            .prefix(keys::vaest_target_attr_prefix(target, attribute))
         {
             let (key, _) = item.into_inner()?;
-            let (_, _, source) = keys::decode_vaet_key(&key)?;
+            let (_, _, source, _) = keys::decode_vaest_key(&key)?;
             entities.push(source);
         }
         Ok(entities)
@@ -94,9 +114,9 @@ impl Store {
         let mut factoms = Vec::new();
         for item in self.txlog.prefix(keys::txlog_prefix(txn)) {
             let (key, payload) = item.into_inner()?;
-            let (txn, entity, attribute, value) = keys::decode_txlog_key(&key)?;
-            let op = Op::from_byte(payload[0])?;
-            factoms.push(Factom::new(entity, attribute, value, txn, op));
+            let (txn, entity, attribute, k, value) = keys::decode_txlog_key(&key)?;
+            let op = Op::try_from(payload[0])?;
+            factoms.push(Factom::new(entity, attribute, k, value, txn, op));
         }
         Ok(factoms)
     }

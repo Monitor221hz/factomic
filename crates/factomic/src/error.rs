@@ -30,6 +30,36 @@ pub enum Error {
     #[error("unknown op byte: {0:#04x}")]
     UnknownOp(u8),
 
+    #[error("unknown collection kind: {0:#04x}")]
+    UnknownKind(u8),
+
+    #[error("attribute {0} requires a non-empty key")]
+    RequiresKey(String),
+
+    #[error("invalid key type for attribute {0}")]
+    InvalidKeyType(String),
+
+    #[error("attribute {0} does not accept a key")]
+    UnexpectedKey(String),
+
+    #[error("attribute {0}: key does not match the collection kind")]
+    MismatchedKey(String),
+
+    #[error("position too long: {0} bytes (max 254)")]
+    PositionTooLong(usize),
+
+    #[error("corrupt position")]
+    CorruptPosition,
+
+    #[error("slot not found on attribute {0}")]
+    SlotNotFound(String),
+
+    #[error("component conflict on attribute {0}")]
+    ComponentConflict(String),
+
+    #[error("invalid schema for attribute {0}")]
+    InvalidSchema(String),
+
     #[error("corrupt key: expected at least {expected} bytes, got {got}")]
     CorruptKey { expected: usize, got: usize },
 
