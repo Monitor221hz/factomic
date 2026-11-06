@@ -1,3 +1,18 @@
+//! A temporal, embedded database model specialized for records-as-data applications.
+//!
+//! A factomic database is a set of immutable atomic facts called [Factom]s. Factoms are only appended to the database, ensuring an audit trail and the capability
+//! to query the database state at different points in time, much like its primary inspiration, Datomic.
+//!
+//! A fact is, in Datomic's words, something done at a point in time that is known to have happened.
+//!
+//! The typical datom relates:
+//! (E)ntity to a (V)alue via an (A)ttribute in (T)xn (which contains time *t*)
+//!
+//! Factomic diverges from Datomic in the introduction of Slots.
+//!
+//! A factom relates:
+//! (Entity) to a (V)alue via an (A)ttribute at (S)lot in (T)xn (which contains time *t*)
+
 #![forbid(unsafe_code)]
 
 mod error;
