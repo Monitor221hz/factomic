@@ -75,6 +75,14 @@ impl Store {
         }
     }
 }
+/*snapshots?
+ * store.db -> store.db()
+* -> pub struct Db {
+    txn: TxnId,
+    snapshot: fjall::Snapshot,
+}
+
+*/
 
 impl<'a> Transaction<'a> {
     pub fn assert<V: EncodePrimitive>(
@@ -311,7 +319,7 @@ impl<'a> Transaction<'a> {
         self.ops.push(PlannedOp::RetractEntity { entity });
         self
     }
-
+    // todo: mutex for single writer or rwlock when snapshots/query result cache (parking_lot?)
     pub fn commit(self) -> Result<Option<TxnId>> {
         let Transaction { store, ops } = self;
         let mut effectives = Vec::new();
@@ -657,7 +665,7 @@ fn plan_move(
     removed.append(&mut asserted);
     Ok(removed)
 }
-// to-do: auto rebalance
+// todo: auto rebalance
 fn plan_rebalance(store: &Store, entity: EntityId, attr: AttributeId) -> Result<Vec<Effective>> {
     let def = store.attribute_def(attr)?;
     if def.kind != CollectionKind::List {
