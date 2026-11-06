@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use fjall::OwnedWriteBatch;
 use fractional_index::FractionalIndex;
@@ -322,38 +322,35 @@ impl<'a> Transaction<'a> {
     // todo: mutex for single writer or rwlock when snapshots/query result cache (parking_lot?)
     pub fn commit(self) -> Result<Option<TxnId>> {
         let Transaction { store, ops } = self;
-        let mut effectives = Vec::new();
-        let mut pending = HashMap::new();
+        let mut effects = Effects::new();
         for op in ops {
-            effectives.extend(plan_op(store, op, &mut pending)?);
+            plan_op(store, op, &mut effects)?;
         }
 
-        if effectives.is_empty() {
+        if effects
+            .values()
+            .all(|eff| eff.evictions.is_empty() && eff.inserts.is_empty())
+        {
             return Ok(None);
         }
 
         let txn = store.alloc_txn_id()?;
         let mut batch = OwnedWriteBatch::with_capacity(store.db.clone(), 24);
 
-        for eff in &effectives {
+        for ((_, attr), eff) in &effects {
             for (to_slot, region) in &eff.inserts {
                 if region[0] != TAG_REF {
                     continue;
                 }
-                for other in &effectives {
-                    if other.attr != eff.attr || other.entity != eff.entity {
-                        continue;
-                    }
-                    for (from_slot, old_region, _) in &other.evictions {
-                        if old_region == region {
-                            store.record_tx_move(&mut batch, txn, eff.attr, from_slot, to_slot);
-                        }
+                for (from_slot, old_region, _) in &eff.evictions {
+                    if old_region == region {
+                        store.record_tx_move(&mut batch, txn, *attr, from_slot, to_slot);
                     }
                 }
             }
         }
 
-        for eff in &effectives {
+        for eff in effects.values() {
             for (slot, old_region, old_txn) in &eff.evictions {
                 let old = FactomRef {
                     entity: eff.entity,
@@ -416,13 +413,113 @@ impl Effective {
             tag: None,
         }
     }
+
+    fn evict(&mut self, slot: Slot, region: Vec<u8>, txn: Option<TxnId>) {
+        match txn {
+            Some(old_txn) => self.evictions.push((slot, region, old_txn)),
+            None => {
+                if let Some(pos) = self
+                    .inserts
+                    .iter()
+                    .position(|(s, r)| *s == slot && *r == region)
+                {
+                    self.inserts.remove(pos);
+                }
+            }
+        }
+    }
 }
 
-fn plan_op(
+type Effects = BTreeMap<(EntityId, AttributeId), Effective>;
+
+struct VisibleDatom {
+    slot: Slot,
+    region: Vec<u8>,
+    txn: Option<TxnId>,
+}
+
+// easvt
+fn order_key(slot: &Slot, region: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(slot.encoded_len() + region.len());
+    slot.encode_key(&mut key);
+    key.extend_from_slice(region);
+    key
+}
+
+fn visible_datoms(
     store: &Store,
-    op: PlannedOp,
-    pending: &mut HashMap<(EntityId, AttributeId), (Slot, Slot)>,
-) -> Result<Vec<Effective>> {
+    effects: &Effects,
+    entity: EntityId,
+    attr: AttributeId,
+) -> Result<Vec<VisibleDatom>> {
+    let pending = effects.get(&(entity, attr));
+    let mut datoms = Vec::new();
+    for guard in store
+        .easvt
+        .prefix(keys::easvt_entity_attr_prefix(entity, attr))
+    {
+        let (key, payload) = guard.into_inner()?;
+        let (slot, consumed) =
+            Slot::decode_key(&key[size_of::<EntityId>() + size_of::<AttributeId>()..])?;
+        let region = key[size_of::<EntityId>() + size_of::<AttributeId>() + consumed..].to_vec();
+        if let Some(eff) = pending
+            && eff
+                .evictions
+                .iter()
+                .any(|(s, r, _)| *s == slot && *r == region)
+        {
+            continue;
+        }
+        let txn = TxnId::with_value(u64::from_be_bytes(payload[..8].try_into().unwrap()));
+        datoms.push(VisibleDatom {
+            slot,
+            region,
+            txn: Some(txn),
+        });
+    }
+    if let Some(eff) = pending {
+        for (slot, region) in &eff.inserts {
+            datoms.push(VisibleDatom {
+                slot: slot.clone(),
+                region: region.clone(),
+                txn: None,
+            });
+        }
+    }
+    datoms.sort_by_key(|d| order_key(&d.slot, &d.region));
+    Ok(datoms)
+}
+
+fn visible_txn(
+    store: &Store,
+    effects: &Effects,
+    entity: EntityId,
+    attr: AttributeId,
+    slot: &Slot,
+    region: &[u8],
+) -> Result<Option<Option<TxnId>>> {
+    if let Some(eff) = effects.get(&(entity, attr)) {
+        if eff.inserts.iter().any(|(s, r)| s == slot && r == region) {
+            return Ok(Some(None));
+        }
+        if eff
+            .evictions
+            .iter()
+            .any(|(s, r, _)| s == slot && r == region)
+        {
+            return Ok(None);
+        }
+    }
+    let key = keys::easvt_key(entity, attr, slot, region);
+    let Some(payload) = store.easvt.get(&key)? else {
+        return Ok(None);
+    };
+    Ok(Some(Some(TxnId::with_value(u64::from_be_bytes(
+        payload[..8].try_into().unwrap(),
+    )))))
+}
+
+fn plan_op(store: &Store, op: PlannedOp, effects: &mut Effects) -> Result<()> {
     match op {
         PlannedOp::Raw {
             op,
@@ -435,8 +532,8 @@ fn plan_op(
             let def = check_type(store, attr, ty)?;
             check_key(&def, &slot)?;
             match op {
-                Op::Assert => plan_assert(store, def, entity, attr, slot, region),
-                Op::Retract => plan_retract(store, def, entity, attr, slot, region),
+                Op::Assert => plan_assert(store, effects, def, entity, attr, slot, region),
+                Op::Retract => plan_retract(store, effects, def, entity, attr, slot, region),
             }
         }
         PlannedOp::Push {
@@ -444,20 +541,20 @@ fn plan_op(
             attr,
             ty,
             region,
-        } => plan_append(store, entity, attr, ty, region, true, pending),
+        } => plan_append(store, effects, entity, attr, ty, region, true),
         PlannedOp::Prepend {
             entity,
             attr,
             ty,
             region,
-        } => plan_append(store, entity, attr, ty, region, false, pending),
+        } => plan_append(store, effects, entity, attr, ty, region, false),
         PlannedOp::RemoveSlot { entity, attr, slot } => {
             let def = store.attribute_def(attr)?;
             if !matches!(def.kind, CollectionKind::List | CollectionKind::Map) {
                 return Err(Error::MismatchedKey(def.name.clone()));
             }
             check_key(&def, &slot)?;
-            plan_remove(store, def, entity, attr, slot)
+            plan_remove(store, effects, def, entity, attr, slot)
         }
         PlannedOp::InsertAt {
             entity,
@@ -466,137 +563,121 @@ fn plan_op(
             region,
             anchor,
             before,
-        } => plan_insert_at(store, entity, attr, ty, region, anchor, before),
+        } => plan_insert_at(store, effects, entity, attr, ty, region, anchor, before),
         PlannedOp::MoveSlot {
             entity,
             attr,
             from,
             to,
-        } => plan_move(store, entity, attr, from, to),
-        PlannedOp::Rebalance { entity, attr } => {
-            pending.remove(&(entity, attr));
-            plan_rebalance(store, entity, attr)
-        }
+        } => plan_move(store, effects, entity, attr, from, to),
+        PlannedOp::Rebalance { entity, attr } => plan_rebalance(store, effects, entity, attr),
         PlannedOp::RetractEntity { entity } => {
             let mut visited = HashSet::new();
-            plan_retract_entity(store, entity, &mut visited)
+            plan_retract_entity(store, effects, entity, &mut visited)
         }
     }
 }
 
 fn plan_assert(
     store: &Store,
+    effects: &mut Effects,
     def: AttributeDef,
     entity: EntityId,
     attr: AttributeId,
     slot: Slot,
     region: Vec<u8>,
-) -> Result<Vec<Effective>> {
-    check_component_owner(store, &def, entity, attr, &region)?;
-    let new_key = keys::easvt_key(entity, attr, &slot, &region);
-    let mut effective = Effective::new(def, entity, attr);
-    match effective.def.kind {
+) -> Result<()> {
+    check_component_owner(store, effects, &def, entity, attr, &region)?;
+    match def.kind {
         CollectionKind::One => {
-            for guard in store
-                .easvt
-                .prefix(keys::easvt_entity_attr_prefix(entity, attr))
-            {
-                let (key, payload) = guard.into_inner()?;
-                if *key == *new_key {
-                    return Ok(vec![]);
-                }
-                let (old_slot, consumed) =
-                    Slot::decode_key(&key[size_of::<EntityId>() + size_of::<AttributeId>()..])?;
-                let old_txn =
-                    TxnId::with_value(u64::from_be_bytes(payload[..8].try_into().unwrap()));
-                let region =
-                    key[size_of::<EntityId>() + size_of::<AttributeId>() + consumed..].to_vec();
-                effective.evictions.push((old_slot, region, old_txn));
+            let visible = visible_datoms(store, effects, entity, attr)?;
+            if visible.iter().any(|d| d.slot == slot && d.region == region) {
+                return Ok(());
             }
+            let eff = effects
+                .entry((entity, attr))
+                .or_insert_with(|| Effective::new(def, entity, attr));
+            for d in visible {
+                eff.evict(d.slot, d.region, d.txn);
+            }
+            eff.inserts.push((slot, region));
         }
         CollectionKind::Many => {
-            if store.easvt.get(&new_key)?.is_some() {
-                return Ok(vec![]);
+            if visible_txn(store, effects, entity, attr, &slot, &region)?.is_some() {
+                return Ok(());
             }
+            effects
+                .entry((entity, attr))
+                .or_insert_with(|| Effective::new(def, entity, attr))
+                .inserts
+                .push((slot, region));
         }
         CollectionKind::List | CollectionKind::Map => {
-            for guard in store
-                .easvt
-                .prefix(keys::easvt_entity_attr_prefix(entity, attr))
-            {
-                let (key, payload) = guard.into_inner()?;
-                if *key == *new_key {
-                    return Ok(vec![]);
-                }
-                let (s, consumed) =
-                    Slot::decode_key(&key[size_of::<EntityId>() + size_of::<AttributeId>()..])?;
-                if s == slot {
-                    let old_txn =
-                        TxnId::with_value(u64::from_be_bytes(payload[..8].try_into().unwrap()));
-                    let region =
-                        key[size_of::<EntityId>() + size_of::<AttributeId>() + consumed..].to_vec();
-                    effective.evictions.push((s, region, old_txn));
-                }
+            let visible = visible_datoms(store, effects, entity, attr)?;
+            if visible.iter().any(|d| d.slot == slot && d.region == region) {
+                return Ok(());
             }
+            let eff = effects
+                .entry((entity, attr))
+                .or_insert_with(|| Effective::new(def, entity, attr));
+            for d in visible.into_iter().filter(|d| d.slot == slot) {
+                eff.evict(d.slot, d.region, d.txn);
+            }
+            eff.inserts.push((slot, region));
         }
     }
-    effective.inserts.push((slot, region));
-    Ok(vec![effective])
+    Ok(())
 }
 
 fn plan_retract(
     store: &Store,
+    effects: &mut Effects,
     def: AttributeDef,
     entity: EntityId,
     attr: AttributeId,
     slot: Slot,
     region: Vec<u8>,
-) -> Result<Vec<Effective>> {
-    let key = keys::easvt_key(entity, attr, &slot, &region);
-    let Some(payload) = store.easvt.get(&key)? else {
-        return Ok(vec![]);
+) -> Result<()> {
+    let Some(txn) = visible_txn(store, effects, entity, attr, &slot, &region)? else {
+        return Ok(());
     };
-    let old_txn = TxnId::with_value(u64::from_be_bytes(payload[..8].try_into().unwrap()));
-    let mut effective = Effective::new(def, entity, attr);
-    effective.evictions.push((slot, region, old_txn));
-    Ok(vec![effective])
+    effects
+        .entry((entity, attr))
+        .or_insert_with(|| Effective::new(def, entity, attr))
+        .evict(slot, region, txn);
+    Ok(())
 }
 
 fn plan_remove(
     store: &Store,
+    effects: &mut Effects,
     def: AttributeDef,
     entity: EntityId,
     attr: AttributeId,
     slot: Slot,
-) -> Result<Vec<Effective>> {
-    for guard in store
-        .easvt
-        .prefix(keys::easvt_entity_attr_prefix(entity, attr))
-    {
-        let (key, payload) = guard.into_inner()?;
-        let (s, consumed) =
-            Slot::decode_key(&key[size_of::<EntityId>() + size_of::<AttributeId>()..])?;
-        if s == slot {
-            let old_txn = TxnId::with_value(u64::from_be_bytes(payload[..8].try_into().unwrap()));
-            let region =
-                key[size_of::<EntityId>() + size_of::<AttributeId>() + consumed..].to_vec();
-            let mut effective = Effective::new(def, entity, attr);
-            effective.evictions.push((s, region, old_txn));
-            return Ok(vec![effective]);
-        }
-    }
-    Ok(vec![])
+) -> Result<()> {
+    let visible = visible_datoms(store, effects, entity, attr)?;
+    let Some(d) = visible.into_iter().find(|d| d.slot == slot) else {
+        return Ok(());
+    };
+    effects
+        .entry((entity, attr))
+        .or_insert_with(|| Effective::new(def, entity, attr))
+        .evict(d.slot, d.region, d.txn);
+    Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan_insert_at(
     store: &Store,
+    effects: &mut Effects,
     entity: EntityId,
     attr: AttributeId,
     ty: Type,
     region: Vec<u8>,
     anchor: Slot,
     before: bool,
-) -> Result<Vec<Effective>> {
+) -> Result<()> {
     let def = check_type(store, attr, ty)?;
     if def.kind != CollectionKind::List {
         return Err(Error::MismatchedKey(def.name.clone()));
@@ -604,26 +685,22 @@ fn plan_insert_at(
     if !matches!(anchor, Slot::Position(_)) {
         return Err(Error::MismatchedKey(def.name.clone()));
     }
+    let visible = visible_datoms(store, effects, entity, attr)?;
     let mut anchor_found = false;
     let mut neighbor = None;
-    for guard in store
-        .easvt
-        .prefix(keys::easvt_entity_attr_prefix(entity, attr))
-    {
-        let (key, _) = guard.into_inner()?;
-        let (s, _) = Slot::decode_key(&key[size_of::<EntityId>() + size_of::<AttributeId>()..])?;
+    for d in &visible {
         if before {
-            if s == anchor {
+            if d.slot == anchor {
                 anchor_found = true;
                 break;
             }
-            neighbor = Some(s);
+            neighbor = Some(d.slot.clone());
         } else {
             if anchor_found {
-                neighbor = Some(s);
+                neighbor = Some(d.slot.clone());
                 break;
             }
-            if s == anchor {
+            if d.slot == anchor {
                 anchor_found = true;
             }
         }
@@ -636,16 +713,17 @@ fn plan_insert_at(
     } else {
         mint_between(Some(&anchor), neighbor.as_ref())?
     };
-    plan_assert(store, def, entity, attr, slot, region)
+    plan_assert(store, effects, def, entity, attr, slot, region)
 }
 
 fn plan_move(
     store: &Store,
+    effects: &mut Effects,
     entity: EntityId,
     attr: AttributeId,
     from: Slot,
     to: Slot,
-) -> Result<Vec<Effective>> {
+) -> Result<()> {
     let def = store.attribute_def(attr)?;
     if def.kind != CollectionKind::List {
         return Err(Error::MismatchedKey(def.name.clone()));
@@ -655,60 +733,54 @@ fn plan_move(
             return Err(Error::MismatchedKey(def.name.clone()));
         }
     }
-    let mut removed = plan_remove(store, def.clone(), entity, attr, from)?;
-    let Some(eff) = removed.pop() else {
+    let visible = visible_datoms(store, effects, entity, attr)?;
+    let Some(d) = visible.into_iter().find(|d| d.slot == from) else {
         return Err(Error::SlotNotFound(def.name.clone()));
     };
-    let region = eff.evictions[0].1.clone();
-    let mut asserted = plan_assert(store, def, entity, attr, to, region)?;
-    removed.push(eff);
-    removed.append(&mut asserted);
-    Ok(removed)
+    let region = d.region.clone();
+    plan_remove(store, effects, def.clone(), entity, attr, from)?;
+    plan_assert(store, effects, def, entity, attr, to, region)
 }
+
 // todo: auto rebalance
-fn plan_rebalance(store: &Store, entity: EntityId, attr: AttributeId) -> Result<Vec<Effective>> {
+fn plan_rebalance(
+    store: &Store,
+    effects: &mut Effects,
+    entity: EntityId,
+    attr: AttributeId,
+) -> Result<()> {
     let def = store.attribute_def(attr)?;
     if def.kind != CollectionKind::List {
         return Err(Error::MismatchedKey(def.name.clone()));
     }
-    let mut rows = Vec::new();
-    for guard in store
-        .easvt
-        .prefix(keys::easvt_entity_attr_prefix(entity, attr))
-    {
-        let (key, payload) = guard.into_inner()?;
-        let (slot, consumed) =
-            Slot::decode_key(&key[size_of::<EntityId>() + size_of::<AttributeId>()..])?;
-        let old_txn = TxnId::with_value(u64::from_be_bytes(payload[..8].try_into().unwrap()));
-        let region = key[size_of::<EntityId>() + size_of::<AttributeId>() + consumed..].to_vec();
-        rows.push((slot, region, old_txn));
+    let visible = visible_datoms(store, effects, entity, attr)?;
+    if visible.len() < 2 {
+        return Ok(());
     }
-    if rows.len() < 2 {
-        return Ok(vec![]);
-    }
-    let mut effective = Effective::new(def, entity, attr);
-    effective.tag = Some("rebalance");
+    let eff = effects
+        .entry((entity, attr))
+        .or_insert_with(|| Effective::new(def, entity, attr));
+    eff.tag = Some("rebalance");
     let mut index = FractionalIndex::default();
-    for (slot, region, old_txn) in rows {
-        effective.evictions.push((slot, region.clone(), old_txn));
-        effective
-            .inserts
+    for d in visible {
+        let region = d.region.clone();
+        eff.evict(d.slot, d.region, d.txn);
+        eff.inserts
             .push((Slot::position(index.as_bytes().to_vec())?, region));
         index = FractionalIndex::new_after(&index);
     }
-    Ok(vec![effective])
+    Ok(())
 }
 
 fn plan_retract_entity(
     store: &Store,
+    effects: &mut Effects,
     entity: EntityId,
     visited: &mut HashSet<EntityId>,
-) -> Result<Vec<Effective>> {
+) -> Result<()> {
     if !visited.insert(entity) {
-        return Ok(vec![]);
+        return Ok(());
     }
-    let mut effectives = Vec::new();
-    let mut by_attr: BTreeMap<AttributeId, (AttributeDef, Evictions)> = BTreeMap::new();
     let mut components = Vec::new();
     for guard in store.easvt.prefix(keys::easvt_entity_prefix(entity)) {
         let (key, payload) = guard.into_inner()?;
@@ -716,51 +788,70 @@ fn plan_retract_entity(
         let (slot, consumed) =
             Slot::decode_key(&key[size_of::<EntityId>() + size_of::<AttributeId>()..])?;
         let region = key[size_of::<EntityId>() + size_of::<AttributeId>() + consumed..].to_vec();
+        if let Some(eff) = effects.get(&(entity, attr))
+            && eff
+                .evictions
+                .iter()
+                .any(|(s, r, _)| *s == slot && *r == region)
+        {
+            continue;
+        }
         let old_txn = TxnId::with_value(u64::from_be_bytes(payload[..8].try_into().unwrap()));
         let def = store.attribute_def(attr)?;
         if def.is_component {
             components.push(EntityId::decode(&region[1..])?);
         }
-        by_attr
-            .entry(attr)
-            .or_insert_with(|| (def, Vec::new()))
-            .1
+        effects
+            .entry((entity, attr))
+            .or_insert_with(|| Effective::new(def, entity, attr))
+            .evictions
             .push((slot, region, old_txn));
     }
-    for (attr, (def, evictions)) in by_attr {
-        effectives.push(Effective {
-            def,
-            entity,
-            attr,
-            evictions,
-            inserts: vec![],
-            tag: None,
-        });
+    // component links still cascade?
+    let pending_attrs: Vec<AttributeId> = effects
+        .range((entity, AttributeId::new(u16::MIN))..=(entity, AttributeId::new(u16::MAX)))
+        .map(|((_, attr), _)| *attr)
+        .collect();
+    for attr in pending_attrs {
+        let eff = effects.get_mut(&(entity, attr)).unwrap();
+        if eff.def.is_component {
+            for (_, region) in &eff.inserts {
+                components.push(EntityId::decode(&region[1..])?);
+            }
+        }
+        eff.inserts.clear();
     }
     for child in components {
-        effectives.extend(plan_retract_entity(store, child, visited)?);
+        plan_retract_entity(store, effects, child, visited)?;
     }
+    // todo: refs asserted earlier same transaction not visible
     for guard in store.vaest.prefix(keys::vaest_target_prefix(entity)) {
         let (key, payload) = guard.into_inner()?;
         let (_, attr, source, slot) = keys::decode_vaest_key(&key)?;
-        let old_txn = TxnId::with_value(u64::from_be_bytes(payload[..8].try_into().unwrap()));
-        let def = store.attribute_def(attr)?;
         let mut region = Vec::with_capacity(9);
         Value::Ref(entity).encode_key(&mut region);
-        effectives.push(Effective {
-            def,
-            entity: source,
-            attr,
-            evictions: vec![(slot, region, old_txn)],
-            inserts: vec![],
-            tag: None,
-        });
+        if let Some(eff) = effects.get(&(source, attr))
+            && eff
+                .evictions
+                .iter()
+                .any(|(s, r, _)| *s == slot && *r == region)
+        {
+            continue;
+        }
+        let old_txn = TxnId::with_value(u64::from_be_bytes(payload[..8].try_into().unwrap()));
+        let def = store.attribute_def(attr)?;
+        effects
+            .entry((source, attr))
+            .or_insert_with(|| Effective::new(def, source, attr))
+            .evictions
+            .push((slot, region, old_txn));
     }
-    Ok(effectives)
+    Ok(())
 }
 
 fn check_component_owner(
     store: &Store,
+    effects: &Effects,
     def: &AttributeDef,
     entity: EntityId,
     attr: AttributeId,
@@ -772,9 +863,21 @@ fn check_component_owner(
     let target = EntityId::decode(&region[1..])?;
     for guard in store.vaest.prefix(keys::vaest_target_prefix(target)) {
         let (key, _) = guard.into_inner()?;
-        let (_, other_attr, source, _) = keys::decode_vaest_key(&key)?;
+        let (_, other_attr, source, other_slot) = keys::decode_vaest_key(&key)?;
         if source == entity && other_attr == attr {
             continue;
+        }
+        //todo: refs asserted earlier same transaction not visible
+        if let Some(eff) = effects.get(&(source, other_attr)) {
+            let mut other_region = Vec::with_capacity(9);
+            Value::Ref(target).encode_key(&mut other_region);
+            if eff
+                .evictions
+                .iter()
+                .any(|(s, r, _)| *s == other_slot && *r == other_region)
+            {
+                continue;
+            }
         }
         let other_def = store.attribute_def(other_attr)?;
         if other_def.is_component {
@@ -786,73 +889,25 @@ fn check_component_owner(
 
 fn plan_append(
     store: &Store,
+    effects: &mut Effects,
     entity: EntityId,
     attr: AttributeId,
     ty: Type,
     region: Vec<u8>,
     after: bool,
-    pending: &mut HashMap<(EntityId, AttributeId), (Slot, Slot)>,
-) -> Result<Vec<Effective>> {
+) -> Result<()> {
     let def = check_type(store, attr, ty)?;
     if def.kind != CollectionKind::List {
         return Err(Error::MismatchedKey(def.name.clone()));
     }
-    let key = (entity, attr);
-    let slot = match pending.get_mut(&key) {
-        Some((first, last)) => {
-            let boundary = if after { last.clone() } else { first.clone() };
-            let slot = mint_position(Some(boundary), after)?;
-            if after {
-                *last = slot.clone();
-            } else {
-                *first = slot.clone();
-            }
-            slot
-        }
-        None => {
-            let db_first = store.boundary_slot(entity, attr, true)?;
-            let db_last = store.boundary_slot(entity, attr, false)?;
-            let boundary = if after {
-                db_last.clone()
-            } else {
-                db_first.clone()
-            };
-            let slot = mint_position(boundary, after)?;
-            let first = if after {
-                db_first.unwrap_or_else(|| slot.clone())
-            } else {
-                slot.clone()
-            };
-            let last = if after {
-                slot.clone()
-            } else {
-                db_last.unwrap_or_else(|| slot.clone())
-            };
-            pending.insert(key, (first, last));
-            slot
-        }
+    let visible = visible_datoms(store, effects, entity, attr)?;
+    let boundary = if after {
+        visible.last().map(|d| d.slot.clone())
+    } else {
+        visible.first().map(|d| d.slot.clone())
     };
-    plan_assert(store, def, entity, attr, slot, region)
-}
-
-impl Store {
-    fn boundary_slot(
-        &self,
-        entity: EntityId,
-        attr: AttributeId,
-        first: bool,
-    ) -> Result<Option<Slot>> {
-        let mut iter = self
-            .easvt
-            .prefix(keys::easvt_entity_attr_prefix(entity, attr));
-        let guard = if first { iter.next() } else { iter.next_back() };
-        let Some(guard) = guard else {
-            return Ok(None);
-        };
-        let (key, _) = guard.into_inner()?;
-        let (slot, _) = Slot::decode_key(&key[size_of::<EntityId>() + size_of::<AttributeId>()..])?;
-        Ok(Some(slot))
-    }
+    let slot = mint_position(boundary, after)?;
+    plan_assert(store, effects, def, entity, attr, slot, region)
 }
 
 fn mint_between(left: Option<&Slot>, right: Option<&Slot>) -> Result<Slot> {
@@ -1369,5 +1424,210 @@ mod tests {
             ..def("person/child", Type::String, CollectionKind::One)
         });
         assert!(matches!(result, Err(Error::InvalidSchema(_))));
+    }
+
+    #[test]
+    fn same_txn_one_attr_last_write_wins() {
+        let (_dir, store) = temp_store();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let e = store.new_entity().unwrap();
+        store
+            .transact()
+            .assert(e, name, &"a")
+            .assert(e, name, &"b")
+            .commit()
+            .unwrap()
+            .unwrap();
+        let factoms = store.entity_factoms(e).unwrap();
+        assert_eq!(factoms.len(), 1);
+        assert_eq!(factoms[0].value(), &Value::String("b".into()));
+    }
+
+    #[test]
+    fn same_txn_list_slot_last_write_wins() {
+        let (_dir, store) = temp_store();
+        let items = declare_list(&store);
+        let e = store.new_entity().unwrap();
+        let k = Slot::position(b"a0".to_vec()).unwrap();
+        store
+            .transact()
+            .assert_at(e, items, k.clone(), &"a")
+            .assert_at(e, items, k.clone(), &"b")
+            .commit()
+            .unwrap()
+            .unwrap();
+        let factoms = store.entity_factoms(e).unwrap();
+        assert_eq!(factoms.len(), 1);
+        assert_eq!(factoms[0].slot(), &k);
+        assert_eq!(factoms[0].value(), &Value::String("b".into()));
+    }
+
+    #[test]
+    fn same_txn_assert_then_retract_nets_to_nothing() {
+        let (_dir, store) = temp_store();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let e = store.new_entity().unwrap();
+        let result = store
+            .transact()
+            .assert(e, name, &"a")
+            .retract(e, name, &"a")
+            .commit()
+            .unwrap();
+        assert_eq!(result, None);
+        assert!(store.entity_factoms(e).unwrap().is_empty());
+        assert!(store.entity_history(e).unwrap().is_empty());
+    }
+
+    #[test]
+    fn same_txn_retract_then_assert_keeps_datom() {
+        let (_dir, store) = temp_store();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let e = store.new_entity().unwrap();
+        store.assert(e, name, &"a").unwrap().unwrap();
+        store
+            .transact()
+            .retract(e, name, &"a")
+            .assert(e, name, &"a")
+            .commit()
+            .unwrap()
+            .unwrap();
+        let factoms = store.entity_factoms(e).unwrap();
+        assert_eq!(factoms.len(), 1);
+        assert_eq!(factoms[0].value(), &Value::String("a".into()));
+    }
+
+    #[test]
+    fn same_txn_remove_cancels_pending_insert() {
+        let (_dir, store) = temp_store();
+        let items = declare_list(&store);
+        let e = store.new_entity().unwrap();
+        let k = Slot::position(b"a0".to_vec()).unwrap();
+        let result = store
+            .transact()
+            .assert_at(e, items, k.clone(), &"a")
+            .remove(e, items, k.clone())
+            .commit()
+            .unwrap();
+        assert_eq!(result, None);
+        assert!(store.entity_factoms(e).unwrap().is_empty());
+    }
+
+    #[test]
+    fn same_txn_insert_after_pending_anchor() {
+        let (_dir, store) = temp_store();
+        let items = declare_list(&store);
+        let e = store.new_entity().unwrap();
+        let k = Slot::position(FractionalIndex::default().as_bytes().to_vec()).unwrap();
+        store
+            .transact()
+            .assert_at(e, items, k.clone(), &"a")
+            .insert_after(e, items, k.clone(), &"b")
+            .commit()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            values(&store, e),
+            vec![Value::String("a".into()), Value::String("b".into())]
+        );
+    }
+
+    #[test]
+    fn same_txn_move_of_pending_slot() {
+        let (_dir, store) = temp_store();
+        let items = declare_list(&store);
+        let e = store.new_entity().unwrap();
+        let from = Slot::position(b"a0".to_vec()).unwrap();
+        let to = Slot::position(b"zz".to_vec()).unwrap();
+        store
+            .transact()
+            .assert_at(e, items, from.clone(), &"x")
+            .move_slot(e, items, from.clone(), to.clone())
+            .commit()
+            .unwrap()
+            .unwrap();
+        let factoms = store.entity_factoms(e).unwrap();
+        assert_eq!(factoms.len(), 1);
+        assert_eq!(factoms[0].slot(), &to);
+        assert_eq!(factoms[0].value(), &Value::String("x".into()));
+    }
+
+    #[test]
+    fn same_txn_rebalance_includes_pending_inserts() {
+        let (_dir, store) = temp_store();
+        let items = declare_list(&store);
+        let e = store.new_entity().unwrap();
+        store.push(e, items, &"a").unwrap().unwrap();
+        store
+            .transact()
+            .push(e, items, &"b")
+            .rebalance(e, items)
+            .commit()
+            .unwrap()
+            .unwrap();
+        let factoms = store.entity_factoms(e).unwrap();
+        assert_eq!(
+            values(&store, e),
+            vec![Value::String("a".into()), Value::String("b".into())]
+        );
+        let mut index = FractionalIndex::default();
+        for factom in &factoms {
+            assert_eq!(
+                factom.slot(),
+                &Slot::position(index.as_bytes().to_vec()).unwrap()
+            );
+            index = FractionalIndex::new_after(&index);
+        }
+    }
+
+    #[test]
+    fn same_txn_ownership_transfer_avoids_false_conflict() {
+        let (_dir, store) = temp_store();
+        let child = store
+            .declare_attribute(AttributeDef {
+                is_component: true,
+                ..def("person/child", Type::Ref, CollectionKind::One)
+            })
+            .unwrap();
+        let o1 = store.new_entity().unwrap();
+        let o2 = store.new_entity().unwrap();
+        let kid = store.new_entity().unwrap();
+        store.assert(o1, child, &kid).unwrap().unwrap();
+        store
+            .transact()
+            .retract(o1, child, &kid)
+            .assert(o2, child, &kid)
+            .commit()
+            .unwrap()
+            .unwrap();
+        let factoms = store.entity_factoms(o2).unwrap();
+        assert_eq!(factoms.len(), 1);
+        assert_eq!(factoms[0].value(), &Value::Ref(kid));
+    }
+
+    #[test]
+    fn same_txn_retract_entity_cancels_pending_and_committed() {
+        let (_dir, store) = temp_store();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let nick = store
+            .declare_attribute(def("person/nick", Type::String, CollectionKind::One))
+            .unwrap();
+        let e = store.new_entity().unwrap();
+        store.assert(e, name, &"alice").unwrap().unwrap();
+        store
+            .transact()
+            .assert(e, nick, &"ally")
+            .retract_entity(e)
+            .commit()
+            .unwrap()
+            .unwrap();
+        assert!(store.entity_factoms(e).unwrap().is_empty());
     }
 }
