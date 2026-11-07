@@ -4,14 +4,20 @@ pub struct EntityId(u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AttributeId(u16);
 
+/// For all intents and purposes, TxnId is identical to [EntityId], and any deviation in behavior should be considered a bug in the code unless stated otherwise. It just lives as a separate struct for type clarity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TxnId(u64);
 
+/// All system (db) created entities, usually transactions by [TxnId], are prefixed by this.
 pub(crate) const SYSTEM_PARTITION: u8 = 0x01;
+
+// All user created entities are prefixed by this.
 pub(crate) const USER_PARTITION: u8 = 0x02;
+
 pub(crate) const TX_TIMESTAMP_ATTR: AttributeId = AttributeId(0x0001);
 pub(crate) const TX_MOVE_ATTR: AttributeId = AttributeId(0x0002);
 pub(crate) const TX_KIND_ATTR: AttributeId = AttributeId(0x0003);
+
 pub(crate) const FIRST_USER_ATTR: u16 = 0x0100;
 
 impl EntityId {

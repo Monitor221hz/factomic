@@ -6,12 +6,12 @@
 //! A fact is, in Datomic's words, something done at a point in time that is known to have happened.
 //!
 //! The typical datom relates:
-//! (E)ntity to a (V)alue via an (A)ttribute in (T)xn (which contains time *t*)
+//! (E)ntity to a (V)alue via an (A)ttribute in (T)xn (which points to an entity that contains point in time *t* in its attribute tx/Instant)
 //!
 //! Factomic diverges from Datomic in the introduction of Slots.
 //!
-//! A factom relates:
-//! (Entity) to a (V)alue via an (A)ttribute at (S)lot in (T)xn (which contains time *t*)
+//! A [Factom] relates:
+//! (Entity) to a (V)alue via an (A)ttribute at (S)lot in (T)xn (which points to an entity that contains point in time *t* in its attribute tx/Timestamp)
 
 #![forbid(unsafe_code)]
 

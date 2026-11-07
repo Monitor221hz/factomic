@@ -8,10 +8,28 @@ pub trait Primitive: Sized {
     const TYPE: Type;
 }
 
+/// For encoding primitives for use in indexes.
+///
+/// Note that [fjall] stores lexicographically by raw bytes, so the encoded bytes must sort in the same logical order as the underlying type. Implementation should be adjusted accordingly.
+///
+/// For example, the default encoding for [i64]:
+/// ```
+/// buf.extend_from_slice(&(*self as u64 ^ 1 << 63).to_be_bytes());
+/// ```
+/// To prevent two's complement from breaking negative integer sorting in big endian.
 pub trait EncodePrimitive: Primitive {
     fn encode(&self, buf: &mut Vec<u8>);
 }
 
+/// For decoding primitives for use in indexes. If your implementing type encodes via [EncodePrimitive] as an already decodable primitive type (e.g [Timestamp] encoding as [i64]), you do not need to implement this.
+///
+/// Note that [fjall] stores lexicographically by raw bytes, so if any byte magic was done to make encoded bytes sort in the same logical order, it must be properly reversed here.
+///
+/// For example, the default decoding for i64:
+/// ```
+/// Ok(i64::from_be_bytes(bytes.try_into().unwrap(),) ^ (1 << 63)) // unwrap used for brevity only
+/// ```
+/// Which successfully counters the shift
 pub trait DecodePrimitive<'a>: Sized + Primitive {
     fn decode(bytes: &'a [u8]) -> Result<Self>;
 }

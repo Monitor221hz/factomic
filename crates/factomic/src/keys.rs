@@ -1,3 +1,23 @@
+//! Defines key/prefix encodings and key decodings in various for use in byte-ordered indexes.
+//!
+//! Each field on the [Factom](crate::factom::Factom) is stored as a separate component on the key, except the last component, which becomes the value.
+//!
+//! | Letter | Name            | Example            | Length (bytes) |
+//! |--------|-----------------|--------------------|----------------|
+//! | E      | [EntityId]      | 0x2000000000000001 | 8              |
+//! | A      | [AttributeId]   | 0x01               | 2              |
+//! | S      | [Slot]          | 0x00               | variable       |
+//! | V      | [Value]         | "Bob"              | variable       |
+//! | T      | [TxnId]         | 0x1000000000000001 | 8              |
+//!
+//! The example column of the above demonstrates a single fact, decomposed:
+//!
+//! > Entity Person changed to "Bob" in "person/name" at One of via transaction.
+//!
+//! Because [fjall] sorts its keys by bytes, searches are `O(log n + k)` complexity where `k` is the number of results to read.
+//!
+//! Since orders are only cheap to scan by prefix, various indexes are kept of components in different orders.
+
 use crate::error::{Error, Result};
 use crate::factom::Slot;
 use crate::id::{AttributeId, EntityId, TxnId};
@@ -7,6 +27,7 @@ const E_LEN: usize = size_of::<EntityId>();
 const A_LEN: usize = size_of::<AttributeId>();
 const T_LEN: usize = size_of::<TxnId>();
 
+/// For entity scans by everything else.
 pub fn easvt_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8]) -> Vec<u8> {
     let mut key = Vec::with_capacity(E_LEN + A_LEN + slot.encoded_len() + v.len());
     key.extend_from_slice(&e.to_be_bytes());
@@ -16,6 +37,7 @@ pub fn easvt_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8]) -> Vec<u8> 
     key
 }
 
+/// For attribute scans by entity; which attributes are contained in which entities.
 pub fn aesvt_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8]) -> Vec<u8> {
     let mut key = Vec::with_capacity(A_LEN + E_LEN + slot.encoded_len() + v.len());
     key.extend_from_slice(&a.to_be_bytes());
@@ -25,6 +47,7 @@ pub fn aesvt_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8]) -> Vec<u8> 
     key
 }
 
+/// For attribute scans by value; which attributes have a value, or are within a range of values (since v is still ordered). Usually opt-in by flag.
 pub fn avest_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8]) -> Vec<u8> {
     let mut key = Vec::with_capacity(A_LEN + v.len() + E_LEN + slot.encoded_len());
     key.extend_from_slice(&a.to_be_bytes());
@@ -34,6 +57,7 @@ pub fn avest_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8]) -> Vec<u8> 
     key
 }
 
+/// For value scans by attribute. This is only used for Ref values, which are entity ids, to find attributes/entities that reference a particular entity.
 pub fn vaest_key(target: EntityId, a: AttributeId, source: EntityId, slot: &Slot) -> Vec<u8> {
     let mut key = Vec::with_capacity(E_LEN + A_LEN + E_LEN + slot.encoded_len());
     key.extend_from_slice(&target.to_be_bytes());
@@ -43,6 +67,7 @@ pub fn vaest_key(target: EntityId, a: AttributeId, source: EntityId, slot: &Slot
     key
 }
 
+/// Same as [easvt_key] but where t is encoded since [Op](crate::factom::Op) is stored as value instead in the key value pair.
 pub fn easvt_history_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8], t: TxnId) -> Vec<u8> {
     let mut key = easvt_key(e, a, slot, v);
     key.reserve_exact(T_LEN);
@@ -50,6 +75,7 @@ pub fn easvt_history_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8], t: 
     key
 }
 
+/// Same as [aesvt_key] but where t is encoded since [Op](crate::factom::Op) is stored as value instead in the key value pair.
 pub fn aesvt_history_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8], t: TxnId) -> Vec<u8> {
     let mut key = aesvt_key(e, a, slot, v);
     key.reserve_exact(T_LEN);
@@ -57,6 +83,7 @@ pub fn aesvt_history_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8], t: 
     key
 }
 
+/// Same as [avest_key] but where t is encoded since [Op](crate::factom::Op) is stored as value instead in the key value pair.
 pub fn avest_history_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8], t: TxnId) -> Vec<u8> {
     let mut key = avest_key(e, a, slot, v);
     key.reserve_exact(T_LEN);
@@ -64,6 +91,7 @@ pub fn avest_history_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8], t: 
     key
 }
 
+/// Same as [vaest_key] but where t is encoded since [Op](crate::factom::Op) is stored as value instead in the key value pair.
 pub fn vaest_history_key(
     target: EntityId,
     a: AttributeId,
