@@ -1039,7 +1039,7 @@ fn plan_retract_entity(
         changes.ensure(def, entity, attr);
         changes.evict(entity, attr, factom)?;
     }
-    // component links still cascade?
+
     for attr in changes.pending_attrs(entity) {
         if let Some(changes) = changes.get(entity, attr)
             && changes.def.is_component
