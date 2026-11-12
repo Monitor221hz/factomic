@@ -105,6 +105,7 @@ pub fn vaest_history_key(
     key
 }
 
+// TEASV where E is sometimes the transaction itself.
 pub fn txlog_key(t: TxnId, e: EntityId, a: AttributeId, slot: &Slot, v: &[u8]) -> Vec<u8> {
     let mut key = Vec::with_capacity(T_LEN + E_LEN + A_LEN + slot.encoded_len() + v.len());
     key.extend_from_slice(&t.to_be_bytes());

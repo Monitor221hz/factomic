@@ -116,9 +116,9 @@ impl Store {
         &self,
         batch: &mut OwnedWriteBatch,
         def: &AttributeDef,
-        datom: FactomRef<'_>,
+        factom: FactomRef<'_>,
     ) -> Result<()> {
-        let (entity, attr, k, region) = (datom.entity, datom.attr, datom.slot, datom.region);
+        let (entity, attr, k, region) = (factom.entity, factom.attr, factom.slot, factom.region);
         batch.remove(&self.easvt, keys::easvt_key(entity, attr, k, region));
         batch.remove(&self.aesvt, keys::aesvt_key(entity, attr, k, region));
         if def.indexed {
@@ -134,11 +134,11 @@ impl Store {
         &self,
         batch: &mut OwnedWriteBatch,
         def: &AttributeDef,
-        datom: FactomRef<'_>,
+        factom: FactomRef<'_>,
         asserted_at: TxnId,
         retracted_at: TxnId,
     ) -> Result<()> {
-        let (entity, attr, k, region) = (datom.entity, datom.attr, datom.slot, datom.region);
+        let (entity, attr, k, region) = (factom.entity, factom.attr, factom.slot, factom.region);
         for (keyspace, key_fn) in [
             (
                 &self.easvt_h,
@@ -602,15 +602,15 @@ mod tests {
             .unwrap();
         let e = store.new_entity().unwrap();
         let txn = store.assert(e, name, &"alice").unwrap().unwrap();
-        let datoms = store.tx_factoms(txn).unwrap();
-        assert_eq!(datoms.len(), 2);
+        let factoms = store.tx_factoms(txn).unwrap();
+        assert_eq!(factoms.len(), 2);
         assert!(
-            datoms
+            factoms
                 .iter()
                 .any(|d| d.entity() == e && d.attribute() == name && d.op() == Op::Assert)
         );
         assert!(
-            datoms
+            factoms
                 .iter()
                 .any(|d| d.entity() == txn.entity_id() && d.attribute() == TX_TIMESTAMP_ATTR)
         );
