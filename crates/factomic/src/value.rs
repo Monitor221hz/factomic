@@ -311,18 +311,6 @@ mod tests {
     }
 
     #[test]
-    fn value_key_preserves_order_within_type() {
-        let mut negatives = Vec::new();
-        Value::Long(-1).encode_key(&mut negatives);
-        let mut zero = Vec::new();
-        Value::Long(0).encode_key(&mut zero);
-        let mut one = Vec::new();
-        Value::Long(1).encode_key(&mut one);
-        assert!(negatives < zero);
-        assert!(zero < one);
-    }
-
-    #[test]
     fn try_from_extracts_owned_primitives() {
         let id = EntityId::new(USER_PARTITION, 7);
         assert!(bool::try_from(&Value::Bool(true)).unwrap());

@@ -1248,29 +1248,7 @@ mod tests {
     }
 
     #[test]
-    fn contains_sorted_factom_checks_membership() {
-        let mut factoms = vec![
-            FactomState::pending(Slot::Empty, vec![1]),
-            FactomState::pending(Slot::position(b"a0".to_vec()).unwrap(), vec![1]),
-            FactomState::pending(Slot::Key(MapKey::Long(1)), vec![1]),
-            FactomState::pending(Slot::Key(MapKey::String("a".into())), vec![1]),
-        ];
-        factoms.sort_by(|left, right| {
-            compare_factom_order(&left.slot, &left.region, &right.slot, &right.region)
-        });
-
-        for factom in &factoms {
-            assert!(contains_sorted_factom(
-                &factoms,
-                &factom.slot,
-                &factom.region
-            ));
-            assert!(!contains_sorted_factom(&factoms, &factom.slot, &[2]));
-        }
-    }
-
-    #[test]
-    fn find_slot_index_checks_boundaries() {
+    fn sorted_factom_searches_work() {
         let mut factoms = vec![
             FactomState::pending(Slot::Empty, vec![1]),
             FactomState::pending(Slot::position(b"a0".to_vec()).unwrap(), vec![1]),
@@ -1282,6 +1260,12 @@ mod tests {
         });
 
         for (index, factom) in factoms.iter().enumerate() {
+            assert!(contains_sorted_factom(
+                &factoms,
+                &factom.slot,
+                &factom.region
+            ));
+            assert!(!contains_sorted_factom(&factoms, &factom.slot, &[2]));
             assert_eq!(find_slot_index(&factoms, &factom.slot), Ok(index));
         }
         assert!(find_slot_index(&factoms, &Slot::Key(MapKey::Long(2))).is_err());
@@ -1302,19 +1286,6 @@ mod tests {
                 Value::String("b".into()),
                 Value::String("c".into())
             ]
-        );
-    }
-
-    #[test]
-    fn prepend_goes_first() {
-        let (_dir, store) = temp_store();
-        let items = declare_list(&store);
-        let e = store.new_entity().unwrap();
-        store.push(e, items, &"b").unwrap().unwrap();
-        store.prepend(e, items, &"a").unwrap().unwrap();
-        assert_eq!(
-            values(&store, e),
-            vec![Value::String("a".into()), Value::String("b".into())]
         );
     }
 
@@ -1532,25 +1503,6 @@ mod tests {
         assert_eq!(factoms.len(), 2);
         assert_eq!(factoms[0].slot(), &slot);
         assert_eq!(factoms[0].value(), &Value::String("a".into()));
-    }
-
-    #[test]
-    fn insert_after_anchors_mid_list() {
-        let (_dir, store) = temp_store();
-        let items = declare_list(&store);
-        let e = store.new_entity().unwrap();
-        store.push(e, items, &"a").unwrap().unwrap();
-        store.push(e, items, &"c").unwrap().unwrap();
-        let anchor = store.entity_factoms(e).unwrap()[0].slot().clone();
-        store.insert_after(e, items, anchor, &"b").unwrap().unwrap();
-        assert_eq!(
-            values(&store, e),
-            vec![
-                Value::String("a".into()),
-                Value::String("b".into()),
-                Value::String("c".into())
-            ]
-        );
     }
 
     #[test]

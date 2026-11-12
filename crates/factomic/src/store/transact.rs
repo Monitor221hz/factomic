@@ -473,15 +473,24 @@ mod tests {
     }
 
     #[test]
-    fn assert_is_idempotent() {
+    fn noop_operations_return_none() {
         let (_dir, store) = temp_store();
         let name = store
             .declare_attribute(def("person/name", Type::String, CollectionKind::One))
             .unwrap();
         let e = store.new_entity().unwrap();
         store.assert(e, name, &"alice").unwrap().unwrap();
-        let second = store.assert(e, name, &"alice").unwrap();
-        assert_eq!(second, None);
+
+        assert_eq!(store.assert(e, name, &"alice").unwrap(), None);
+        assert_eq!(store.retract(e, name, &"nobody").unwrap(), None);
+        let result = store
+            .transact()
+            .assert(e, name, &"alice")
+            .retract(e, name, &"bob")
+            .commit()
+            .unwrap();
+
+        assert_eq!(result, None);
         assert_eq!(store.entity_factoms(e).unwrap().len(), 1);
     }
 
@@ -543,16 +552,6 @@ mod tests {
             txn2,
             Op::Retract
         )));
-    }
-
-    #[test]
-    fn retract_missing_value_is_noop() {
-        let (_dir, store) = temp_store();
-        let name = store
-            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
-            .unwrap();
-        let e = store.new_entity().unwrap();
-        assert_eq!(store.retract(e, name, &"nobody").unwrap(), None);
     }
 
     #[test]
@@ -713,23 +712,6 @@ mod tests {
         assert_eq!(factoms.len(), 2);
         assert!(factoms.iter().all(|f| f.txn() == txn));
         assert_eq!(store.tx_factoms(txn).unwrap().len(), 3);
-    }
-
-    #[test]
-    fn builder_all_noops_returns_none() {
-        let (_dir, store) = temp_store();
-        let name = store
-            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
-            .unwrap();
-        let e = store.new_entity().unwrap();
-        store.assert(e, name, &"alice").unwrap().unwrap();
-        let result = store
-            .transact()
-            .assert(e, name, &"alice")
-            .retract(e, name, &"bob")
-            .commit()
-            .unwrap();
-        assert_eq!(result, None);
     }
 
     #[test]
