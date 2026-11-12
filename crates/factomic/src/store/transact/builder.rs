@@ -16,7 +16,7 @@ use crate::value::{TAG_REF, Type, Value};
 
 use super::{FactomRef, check_key, check_type, encode_region, ref_target, value_region};
 
-const EASVT_FACTOM_OFFSET: usize = size_of::<EntityId>() + size_of::<AttributeId>();
+const EA_KEY_OFFSET: usize = size_of::<EntityId>() + size_of::<AttributeId>();
 
 enum InsertPosition {
     Before(Slot),
@@ -364,14 +364,12 @@ fn write_attribute_changes(
     let evictions = changes
         .evictions
         .iter()
-        .map(|(key, old_txn)| {
-            decode_factom_key(key, Some(*old_txn)).map(|factom| (factom, *old_txn))
-        })
+        .map(|(key, old_txn)| decode_sv_key(key, Some(*old_txn)).map(|factom| (factom, *old_txn)))
         .collect::<Result<Vec<_>>>()?;
     let inserts = changes
         .inserts
         .iter()
-        .map(|key| decode_factom_key(key, None))
+        .map(|key| decode_sv_key(key, None))
         .collect::<Result<Vec<_>>>()?;
 
     for insert in &inserts {
@@ -515,7 +513,7 @@ impl TransactionChanges {
         slot: Slot,
         region: Vec<u8>,
     ) -> Result<()> {
-        let key = encode_factom_key(&slot, &region);
+        let key = sv_key(&slot, &region);
         let reference_key =
             ref_target(&region)?.map(|target| keys::vaest_key(target, attr, entity, &slot));
         self.by_attribute
@@ -549,7 +547,7 @@ impl TransactionChanges {
             return Ok(());
         };
         for key in &changes.inserts {
-            let insert = decode_factom_key(key, None)?;
+            let insert = decode_sv_key(key, None)?;
             if let Some(target) = ref_target(&insert.region)? {
                 self.reference_inserts
                     .remove(&keys::vaest_key(target, attr, entity, &insert.slot));
@@ -578,7 +576,7 @@ impl TransactionChanges {
         let mut expected = BTreeSet::new();
         for ((entity, attr), changes) in &self.by_attribute {
             for key in &changes.inserts {
-                let insert = decode_factom_key(key, None).unwrap();
+                let insert = decode_sv_key(key, None).unwrap();
                 if let Some(target) = ref_target(&insert.region).unwrap() {
                     expected.insert(keys::vaest_key(target, *attr, *entity, &insert.slot));
                 }
@@ -608,12 +606,12 @@ impl FactomState {
     }
 
     fn encoded_key(&self) -> Vec<u8> {
-        encode_factom_key(&self.slot, &self.region)
+        sv_key(&self.slot, &self.region)
     }
 }
 
-// svt
-fn encode_factom_key(slot: &Slot, region: &[u8]) -> Vec<u8> {
+// sv
+fn sv_key(slot: &Slot, region: &[u8]) -> Vec<u8> {
     let mut key = Vec::with_capacity(slot.encoded_len() + region.len());
     slot.encode_key(&mut key);
     key.extend_from_slice(region);
@@ -624,7 +622,7 @@ fn decode_txn(payload: &[u8]) -> TxnId {
     TxnId::with_value(u64::from_be_bytes(payload[..8].try_into().unwrap()))
 }
 
-fn decode_factom_key(key: &[u8], txn: Option<TxnId>) -> Result<FactomState> {
+fn decode_sv_key(key: &[u8], txn: Option<TxnId>) -> Result<FactomState> {
     let (slot, consumed) = Slot::decode_key(key)?;
     let region = key[consumed..].to_vec();
     Ok(FactomState::new(slot, region, txn))
@@ -669,6 +667,10 @@ fn contains_sorted_factom(factoms: &[FactomState], slot: &Slot, region: &[u8]) -
         .is_ok()
 }
 
+fn find_slot_index(factoms: &[FactomState], slot: &Slot) -> std::result::Result<usize, usize> {
+    factoms.binary_search_by(|factom| compare_slots(&factom.slot, slot))
+}
+
 fn visible_factoms(
     store: &Store,
     changes: &TransactionChanges,
@@ -681,14 +683,14 @@ fn visible_factoms(
         .prefix(keys::easvt_entity_attr_prefix(entity, attr))
         .map(|guard| -> Result<Option<_>> {
             let (key, payload) = guard.into_inner()?;
-            let factom_key = &key[EASVT_FACTOM_OFFSET..];
+            let factom_key = &key[EA_KEY_OFFSET..];
             if let Some(changes) = pending
                 && changes.evictions.contains_key(factom_key)
             {
                 return Ok(None);
             }
             let txn = decode_txn(&payload);
-            let factom = decode_factom_key(factom_key, Some(txn))?;
+            let factom = decode_sv_key(factom_key, Some(txn))?;
             Ok(Some((key, factom)))
         })
         .filter_map(|result| result.transpose())
@@ -702,7 +704,7 @@ fn visible_factoms(
     loop {
         let take_committed = match (committed.peek(), inserts.peek()) {
             (Some(Ok((key, _))), Some(insert_key)) => {
-                &key[EASVT_FACTOM_OFFSET..] <= insert_key.as_slice()
+                &key[EA_KEY_OFFSET..] <= insert_key.as_slice()
             }
             (Some(_), _) => true,
             (None, Some(_)) => false,
@@ -713,7 +715,7 @@ fn visible_factoms(
             factoms.push(factom);
         } else {
             let insert_key = inserts.next().unwrap();
-            factoms.push(decode_factom_key(insert_key, None)?);
+            factoms.push(decode_sv_key(insert_key, None)?);
         }
     }
 
@@ -735,7 +737,7 @@ fn factom_visibility(
     region: &[u8],
 ) -> Result<FactomVisibility> {
     if let Some(changes) = changes.get(entity, attr) {
-        let key = encode_factom_key(slot, region);
+        let key = sv_key(slot, region);
         if changes.inserts.contains(&key) {
             return Ok(FactomVisibility::Pending);
         }
@@ -868,12 +870,12 @@ fn plan_remove(
     attr: AttributeId,
     slot: Slot,
 ) -> Result<()> {
-    let visible = visible_factoms(store, changes, entity, attr)?;
-    let Some(factom) = visible.into_iter().find(|factom| factom.slot == slot) else {
+    let mut visible = visible_factoms(store, changes, entity, attr)?;
+    let Ok(index) = find_slot_index(&visible, &slot) else {
         return Ok(());
     };
     changes.ensure(def, entity, attr);
-    changes.evict(entity, attr, factom)
+    changes.evict(entity, attr, visible.swap_remove(index))
 }
 
 fn plan_insert_at(
@@ -896,7 +898,7 @@ fn plan_insert_at(
         return Err(Error::MismatchedKey(def.name.clone()));
     }
     let visible = visible_factoms(store, changes, entity, attr)?;
-    let Some(anchor_index) = visible.iter().position(|factom| &factom.slot == anchor) else {
+    let Ok(anchor_index) = find_slot_index(&visible, anchor) else {
         return Err(Error::SlotNotFound(def.name.clone()));
     };
     let (left, right) = match position {
@@ -930,10 +932,10 @@ fn plan_move(
         }
     }
     let visible = visible_factoms(store, changes, entity, attr)?;
-    let Some(factom) = visible.into_iter().find(|factom| factom.slot == from) else {
+    let Ok(index) = find_slot_index(&visible, &from) else {
         return Err(Error::SlotNotFound(def.name.clone()));
     };
-    let region = factom.region.clone();
+    let region = visible[index].region.clone();
     plan_remove(store, changes, def.clone(), entity, attr, from)?;
     plan_assert(store, changes, def, entity, attr, to, region)
 }
@@ -986,9 +988,7 @@ fn for_each_visible_reference(
         let (_, attr, source, slot) = keys::decode_vaest_key(&key)?;
         let region = value_region(&Value::Ref(target));
         if let Some(changes) = changes.get(source, attr)
-            && changes
-                .evictions
-                .contains_key(&encode_factom_key(&slot, &region))
+            && changes.evictions.contains_key(&sv_key(&slot, &region))
         {
             continue;
         }
@@ -1024,14 +1024,14 @@ fn plan_retract_entity(
     for guard in store.easvt.prefix(keys::easvt_entity_prefix(entity)) {
         let (key, payload) = guard.into_inner()?;
         let attr = AttributeId::new(u16::from_be_bytes(key[8..10].try_into().unwrap()));
-        let factom_key = &key[EASVT_FACTOM_OFFSET..];
+        let factom_key = &key[EA_KEY_OFFSET..];
         if let Some(changes) = changes.get(entity, attr)
             && changes.evictions.contains_key(factom_key)
         {
             continue;
         }
         let old_txn = decode_txn(&payload);
-        let factom = decode_factom_key(factom_key, Some(old_txn))?;
+        let factom = decode_sv_key(factom_key, Some(old_txn))?;
         let def = store.attribute_def(attr)?;
         if def.is_component {
             components.push(EntityId::decode(&factom.region[1..])?);
@@ -1045,7 +1045,7 @@ fn plan_retract_entity(
             && changes.def.is_component
         {
             for key in &changes.inserts {
-                let insert = decode_factom_key(key, None)?;
+                let insert = decode_sv_key(key, None)?;
                 components.push(EntityId::decode(&insert.region[1..])?);
             }
         }
@@ -1201,8 +1201,8 @@ mod tests {
 
         for slot in slots {
             for txn in [None, Some(TxnId::with_value(42))] {
-                let key = encode_factom_key(&slot, &region);
-                let decoded = decode_factom_key(&key, txn).unwrap();
+                let key = sv_key(&slot, &region);
+                let decoded = decode_sv_key(&key, txn).unwrap();
                 assert_eq!(decoded.slot, slot);
                 assert_eq!(decoded.region, region);
                 assert_eq!(decoded.txn, txn);
@@ -1238,8 +1238,7 @@ mod tests {
                     for right_region in regions {
                         assert_eq!(
                             compare_factom_order(left_slot, left_region, right_slot, right_region,),
-                            encode_factom_key(left_slot, left_region)
-                                .cmp(&encode_factom_key(right_slot, right_region)),
+                            sv_key(left_slot, left_region).cmp(&sv_key(right_slot, right_region)),
                             "mismatch for ({left_slot:?}, {left_region:?}) and ({right_slot:?}, {right_region:?})",
                         );
                     }
@@ -1268,6 +1267,24 @@ mod tests {
             ));
             assert!(!contains_sorted_factom(&factoms, &factom.slot, &[2]));
         }
+    }
+
+    #[test]
+    fn find_slot_index_checks_boundaries() {
+        let mut factoms = vec![
+            FactomState::pending(Slot::Empty, vec![1]),
+            FactomState::pending(Slot::position(b"a0".to_vec()).unwrap(), vec![1]),
+            FactomState::pending(Slot::Key(MapKey::Long(1)), vec![1]),
+            FactomState::pending(Slot::Key(MapKey::String("a".into())), vec![1]),
+        ];
+        factoms.sort_by(|left, right| {
+            compare_factom_order(&left.slot, &left.region, &right.slot, &right.region)
+        });
+
+        for (index, factom) in factoms.iter().enumerate() {
+            assert_eq!(find_slot_index(&factoms, &factom.slot), Ok(index));
+        }
+        assert!(find_slot_index(&factoms, &Slot::Key(MapKey::Long(2))).is_err());
     }
 
     #[test]
