@@ -1,6 +1,9 @@
 use std::path::Path;
+use std::sync::Arc;
 
-use fjall::{Database, Keyspace, KeyspaceCreateOptions};
+use arc_swap::ArcSwap;
+use fjall::{Database, Keyspace, KeyspaceCreateOptions, Readable};
+use parking_lot::Mutex;
 
 use crate::error::{Error, Result};
 use crate::factom::CollectionKind;
@@ -28,6 +31,59 @@ pub struct AttributeDef {
 const META_NEXT_ATTR: &[u8; 9] = b"next_attr";
 const META_ENTITY_PREFIX: u8 = 0x02;
 
+pub struct Db {
+    txn: TxnId,
+    snapshot: fjall::Snapshot,
+    attrs: Keyspace,
+    easvt: Keyspace,
+    aesvt: Keyspace,
+    avest: Keyspace,
+    vaest: Keyspace,
+    easvt_h: Keyspace,
+    aesvt_h: Keyspace,
+    avest_h: Keyspace,
+    vaest_h: Keyspace,
+    txlog: Keyspace,
+} //todo: multi reader/single writer affirming tests
+
+impl Db {
+    pub fn attribute_def(&self, id: AttributeId) -> Result<AttributeDef> {
+        let payload = self
+            .snapshot
+            .get(&self.attrs, by_attr_key(id))?
+            .ok_or_else(|| Error::UnknownAttribute(format!("{id:?}")))?;
+
+        if payload.len() < 4 {
+            return Err(Error::CorruptKey {
+                expected: 4,
+                got: payload.len(),
+            });
+        }
+        let key_type = match payload[payload.len() - 1] {
+            0x00 => None,
+            tag => Some(type_for_tag(tag)?),
+        };
+        let kind = CollectionKind::try_from(payload[payload.len() - 2])?;
+        let flags = payload[payload.len() - 3];
+        let indexed = flags & 1 != 0;
+        let is_component = flags & 0b10 != 0;
+
+        let value_type = type_for_tag(payload[payload.len() - 4])?;
+
+        let name = String::from_utf8(payload[..payload.len() - 4].to_vec())
+            .map_err(|_| Error::CorruptPrimitive(Type::String))?;
+
+        Ok(AttributeDef {
+            name,
+            value_type,
+            kind,
+            key_type,
+            indexed,
+            is_component,
+        })
+    }
+}
+
 pub struct Store {
     pub(crate) db: Database,
     pub(crate) meta: Keyspace,
@@ -41,7 +97,10 @@ pub struct Store {
     pub(crate) avest_h: Keyspace,
     pub(crate) vaest_h: Keyspace,
     pub(crate) txlog: Keyspace,
+    pub(crate) current: ArcSwap<Db>,
+    pub(crate) transact_lock: Mutex<()>,
 }
+
 const BY_NAME_PREFIX: u8 = 0x01; // -> attr id
 const BY_ATTR_PREFIX: u8 = 0x02; // -> name, tag, flags
 
@@ -78,6 +137,34 @@ fn by_name_value(attr_id: AttributeId) -> [u8; size_of::<AttributeId>()] {
 }
 
 impl Store {
+    pub fn db(&self) -> Arc<Db> {
+        self.current.load().clone()
+    }
+
+    pub(crate) fn swap(&self, txn: TxnId) {
+        self.current.store(
+            Db {
+                txn,
+                snapshot: self.db.snapshot(),
+                attrs: self.attrs.clone(),
+                easvt: self.easvt.clone(),
+                aesvt: self.aesvt.clone(),
+                avest: self.avest.clone(),
+                vaest: self.vaest.clone(),
+                easvt_h: self.easvt_h.clone(),
+                aesvt_h: self.aesvt_h.clone(),
+                avest_h: self.avest_h.clone(),
+                vaest_h: self.vaest_h.clone(),
+                txlog: self.txlog.clone(),
+            }
+            .into(),
+        );
+    }
+
+    pub(crate) fn refresh(&self) {
+        self.swap(self.current.load().txn);
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let db = Database::builder(path).open()?;
         let meta = db.keyspace("meta", KeyspaceCreateOptions::default)?;
@@ -91,6 +178,20 @@ impl Store {
         let avest_h = db.keyspace("avest_h", KeyspaceCreateOptions::default)?;
         let vaest_h = db.keyspace("vaest_h", KeyspaceCreateOptions::default)?;
         let txlog = db.keyspace("txlog", KeyspaceCreateOptions::default)?;
+        let snapshot = ArcSwap::from_pointee(Db {
+            txn: TxnId::with_value(0),
+            snapshot: db.snapshot(),
+            attrs: attrs.clone(),
+            easvt: easvt.clone(),
+            aesvt: aesvt.clone(),
+            avest: avest.clone(),
+            vaest: vaest.clone(),
+            easvt_h: easvt_h.clone(),
+            aesvt_h: aesvt_h.clone(),
+            avest_h: avest_h.clone(),
+            vaest_h: vaest_h.clone(),
+            txlog: txlog.clone(),
+        });
         let store = Store {
             db,
             meta,
@@ -104,6 +205,8 @@ impl Store {
             avest_h,
             vaest_h,
             txlog,
+            current: snapshot,
+            transact_lock: Mutex::new(()),
         };
         store.sync_system_attributes()?;
         Ok(store)
@@ -150,6 +253,7 @@ impl Store {
     }
 
     pub fn declare_attribute(&self, def: AttributeDef) -> Result<AttributeId> {
+        let _guard = self.transact_lock.lock();
         let valid_key_type = match def.kind {
             CollectionKind::Map => {
                 matches!(def.key_type, Some(Type::String | Type::Long | Type::Ref))
@@ -187,6 +291,7 @@ impl Store {
             .insert(&by_name_key, attribute_id.to_be_bytes())?;
         let by_id_key = by_attr_key(attribute_id);
         self.attrs.insert(by_id_key, by_attr_value(&def))?;
+        self.refresh();
         Ok(attribute_id)
     }
 
@@ -243,6 +348,8 @@ impl Store {
     }
 
     pub fn new_entity(&self) -> Result<EntityId> {
+        let _guard = self.transact_lock.lock();
+        self.refresh();
         self.alloc_entity_id(USER_PARTITION)
     }
 }
@@ -332,6 +439,6 @@ mod tests {
     fn fresh_entity_has_no_factoms() {
         let (_dir, store) = temp_store();
         let entity = store.new_entity().unwrap();
-        assert!(store.entity_factoms(entity).unwrap().is_empty());
+        assert!(store.db().entity_factoms(entity).unwrap().is_empty());
     }
 }

@@ -13,7 +13,7 @@ pub trait Primitive: Sized {
 /// Note that [fjall] stores lexicographically by raw bytes, so the encoded bytes must sort in the same logical order as the underlying type. Implementation should be adjusted accordingly.
 ///
 /// For example, the default encoding for [i64]:
-/// ```
+/// ```ignore
 /// buf.extend_from_slice(&(*self as u64 ^ 1 << 63).to_be_bytes());
 /// ```
 /// To prevent two's complement from breaking negative integer sorting in big endian.
@@ -26,7 +26,7 @@ pub trait EncodePrimitive: Primitive {
 /// Note that [fjall] stores lexicographically by raw bytes, so if any byte magic was done to make encoded bytes sort in the same logical order, it must be properly reversed here.
 ///
 /// For example, the default decoding for i64:
-/// ```
+/// ```ignore
 /// Ok(i64::from_be_bytes(bytes.try_into().unwrap(),) ^ (1 << 63)) // unwrap used for brevity only
 /// ```
 /// Which successfully counters the shift

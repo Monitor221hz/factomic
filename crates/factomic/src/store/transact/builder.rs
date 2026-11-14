@@ -6,13 +6,16 @@ use std::{
 use fjall::OwnedWriteBatch;
 use fractional_index::FractionalIndex;
 
-use crate::error::{Error, Result};
 use crate::factom::{ASSERT, CollectionKind, MapKey, Op, RETRACT, Slot};
 use crate::id::{AttributeId, EntityId, TxnId};
 use crate::keys;
 use crate::primitive::{DecodePrimitive, EncodePrimitive};
 use crate::store::{AttributeDef, Store};
 use crate::value::{TAG_REF, Type, Value};
+use crate::{
+    error::{Error, Result},
+    store::Db,
+};
 
 use super::{FactomRef, check_key, check_type, encode_region, ref_target, value_region};
 
@@ -331,6 +334,7 @@ impl<'a> Transaction<'a> {
     // todo: mutex for single writer or rwlock when snapshots/query result cache (parking_lot?)
     pub fn commit(self) -> Result<Option<TxnId>> {
         let Transaction { store, ops } = self;
+        let _guard = store.transact_lock.lock();
         let mut changes = TransactionChanges::new();
         for op in ops {
             plan_op(store, op, &mut changes)?;
@@ -351,6 +355,7 @@ impl<'a> Transaction<'a> {
 
         store.record_tx_timestamp(&mut batch, txn);
         batch.commit()?;
+        store.swap(txn);
         Ok(Some(txn))
     }
 }
@@ -1146,6 +1151,7 @@ mod tests {
 
     fn values(store: &Store, entity: EntityId) -> Vec<Value> {
         store
+            .db()
             .entity_factoms(entity)
             .unwrap()
             .iter()
@@ -1302,7 +1308,7 @@ mod tests {
             .commit()
             .unwrap()
             .unwrap();
-        let factoms = store.entity_factoms(e).unwrap();
+        let factoms = store.db().entity_factoms(e).unwrap();
         assert_eq!(factoms.len(), 3);
         assert!(factoms.iter().all(|f| f.txn() == txn));
         assert_eq!(
@@ -1323,7 +1329,7 @@ mod tests {
         store.push(e, items, &"a").unwrap().unwrap();
         store.push(e, items, &"b").unwrap().unwrap();
         store.push(e, items, &"c").unwrap().unwrap();
-        let middle = store.entity_factoms(e).unwrap()[1].slot().clone();
+        let middle = store.db().entity_factoms(e).unwrap()[1].slot().clone();
         store.remove(e, items, middle).unwrap().unwrap();
         assert_eq!(
             values(&store, e),
@@ -1338,7 +1344,7 @@ mod tests {
         let e = store.new_entity().unwrap();
         store.push(e, items, &"a").unwrap().unwrap();
         store.push(e, items, &"b").unwrap().unwrap();
-        let middle = store.entity_factoms(e).unwrap()[1].slot().clone();
+        let middle = store.db().entity_factoms(e).unwrap()[1].slot().clone();
         store.remove(e, items, middle).unwrap().unwrap();
         store.push(e, items, &"c").unwrap().unwrap();
         assert_eq!(
@@ -1364,7 +1370,7 @@ mod tests {
             .put(e, scores, MapKey::String("b".into()), &3i64)
             .unwrap()
             .unwrap();
-        let factoms = store.entity_factoms(e).unwrap();
+        let factoms = store.db().entity_factoms(e).unwrap();
         assert_eq!(factoms.len(), 2);
         assert_eq!(factoms[0].slot(), &Slot::Key(MapKey::String("a".into())));
         assert_eq!(factoms[0].value(), &Value::Long(1));
@@ -1464,7 +1470,7 @@ mod tests {
         store.push(e, items, &"a").unwrap().unwrap();
         store.push(e, items, &"b").unwrap().unwrap();
         store.push(e, items, &"c").unwrap().unwrap();
-        let second = store.slot_at(e, items, 1).unwrap().unwrap();
+        let second = store.db().slot_at(e, items, 1).unwrap().unwrap();
         store.insert_after(e, items, second, &"x").unwrap().unwrap();
         assert_eq!(
             values(&store, e),
@@ -1475,8 +1481,8 @@ mod tests {
                 Value::String("c".into())
             ]
         );
-        assert_eq!(store.slot_at(e, items, 4).unwrap(), None);
-        assert_eq!(store.slot_at(e, items, 99).unwrap(), None);
+        assert_eq!(store.db().slot_at(e, items, 4).unwrap(), None);
+        assert_eq!(store.db().slot_at(e, items, 99).unwrap(), None);
     }
 
     #[test]
@@ -1486,7 +1492,7 @@ mod tests {
         let e = store.new_entity().unwrap();
         let txn = store.push(e, items, &"a").unwrap().unwrap();
         store.revert_txn(txn).unwrap();
-        assert!(store.entity_factoms(e).unwrap().is_empty());
+        assert!(store.db().entity_factoms(e).unwrap().is_empty());
     }
 
     #[test]
@@ -1496,10 +1502,10 @@ mod tests {
         let e = store.new_entity().unwrap();
         store.push(e, items, &"a").unwrap().unwrap();
         store.push(e, items, &"b").unwrap().unwrap();
-        let slot = store.entity_factoms(e).unwrap()[0].slot().clone();
+        let slot = store.db().entity_factoms(e).unwrap()[0].slot().clone();
         let removed = store.remove(e, items, slot.clone()).unwrap().unwrap();
         store.revert_txn(removed).unwrap();
-        let factoms = store.entity_factoms(e).unwrap();
+        let factoms = store.db().entity_factoms(e).unwrap();
         assert_eq!(factoms.len(), 2);
         assert_eq!(factoms[0].slot(), &slot);
         assert_eq!(factoms[0].value(), &Value::String("a".into()));
@@ -1511,7 +1517,7 @@ mod tests {
         let items = declare_list(&store);
         let e = store.new_entity().unwrap();
         store.push(e, items, &"b").unwrap().unwrap();
-        let anchor = store.entity_factoms(e).unwrap()[0].slot().clone();
+        let anchor = store.db().entity_factoms(e).unwrap()[0].slot().clone();
         store
             .insert_before(e, items, anchor, &"a")
             .unwrap()
@@ -1545,20 +1551,20 @@ mod tests {
         let e = store.new_entity().unwrap();
         let target = store.new_entity().unwrap();
         store.push(e, items, &target).unwrap().unwrap();
-        let from = store.entity_factoms(e).unwrap()[0].slot().clone();
+        let from = store.db().entity_factoms(e).unwrap()[0].slot().clone();
         let to = Slot::position(b"zz".to_vec()).unwrap();
         let txn = store
             .move_slot(e, items, from.clone(), to.clone())
             .unwrap()
             .unwrap();
-        let factoms = store.entity_factoms(e).unwrap();
+        let factoms = store.db().entity_factoms(e).unwrap();
         assert_eq!(factoms.len(), 1);
         assert_eq!(factoms[0].slot(), &to);
         assert_eq!(factoms[0].value(), &Value::Ref(target));
         let mut expected = attr_bytes(items);
         from.encode_key(&mut expected);
         to.encode_key(&mut expected);
-        let tx_factoms = store.entity_factoms(txn.entity_id()).unwrap();
+        let tx_factoms = store.db().entity_factoms(txn.entity_id()).unwrap();
         assert!(
             tx_factoms
                 .iter()
@@ -1590,16 +1596,16 @@ mod tests {
         let e = store.new_entity().unwrap();
         store.push(e, items, &"a").unwrap().unwrap();
         store.push(e, items, &"c").unwrap().unwrap();
-        let anchor = store.entity_factoms(e).unwrap()[1].slot().clone();
+        let anchor = store.db().entity_factoms(e).unwrap()[1].slot().clone();
         store
             .insert_before(e, items, anchor.clone(), &"b")
             .unwrap()
             .unwrap();
-        let fractional = store.entity_factoms(e).unwrap()[1].slot().clone();
+        let fractional = store.db().entity_factoms(e).unwrap()[1].slot().clone();
         assert_ne!(fractional, anchor);
 
         let txn = store.rebalance(e, items).unwrap().unwrap();
-        let factoms = store.entity_factoms(e).unwrap();
+        let factoms = store.db().entity_factoms(e).unwrap();
         assert_eq!(factoms.len(), 3);
         assert_eq!(
             factoms
@@ -1621,7 +1627,7 @@ mod tests {
             index = FractionalIndex::new_after(&index);
         }
         assert_ne!(factoms[1].slot(), &fractional);
-        let tx_factoms = store.entity_factoms(txn.entity_id()).unwrap();
+        let tx_factoms = store.db().entity_factoms(txn.entity_id()).unwrap();
         assert!(
             tx_factoms.iter().any(|f| f.attribute() == TX_KIND_ATTR
                 && f.value() == &Value::String("rebalance".into()))
@@ -1643,8 +1649,8 @@ mod tests {
         store.assert(e2, name, &"bob").unwrap().unwrap();
         store.assert(e2, friend, &e1).unwrap().unwrap();
         store.retract_entity(e1).unwrap().unwrap();
-        assert!(store.entity_factoms(e1).unwrap().is_empty());
-        let e2_factoms = store.entity_factoms(e2).unwrap();
+        assert!(store.db().entity_factoms(e1).unwrap().is_empty());
+        let e2_factoms = store.db().entity_factoms(e2).unwrap();
         assert_eq!(e2_factoms.len(), 1);
         assert_eq!(e2_factoms[0].attribute(), name);
     }
@@ -1666,8 +1672,8 @@ mod tests {
         store.assert(kid, name, &"junior").unwrap().unwrap();
         store.assert(parent, child, &kid).unwrap().unwrap();
         store.retract_entity(parent).unwrap().unwrap();
-        assert!(store.entity_factoms(parent).unwrap().is_empty());
-        assert!(store.entity_factoms(kid).unwrap().is_empty());
+        assert!(store.db().entity_factoms(parent).unwrap().is_empty());
+        assert!(store.db().entity_factoms(kid).unwrap().is_empty());
     }
 
     #[test]
@@ -1684,8 +1690,8 @@ mod tests {
         store.assert(a, partner, &b).unwrap().unwrap();
         store.assert(b, partner, &a).unwrap().unwrap();
         store.retract_entity(a).unwrap().unwrap();
-        assert!(store.entity_factoms(a).unwrap().is_empty());
-        assert!(store.entity_factoms(b).unwrap().is_empty());
+        assert!(store.db().entity_factoms(a).unwrap().is_empty());
+        assert!(store.db().entity_factoms(b).unwrap().is_empty());
     }
 
     #[test]
@@ -1729,7 +1735,7 @@ mod tests {
             .commit()
             .unwrap()
             .unwrap();
-        let factoms = store.entity_factoms(e).unwrap();
+        let factoms = store.db().entity_factoms(e).unwrap();
         assert_eq!(factoms.len(), 1);
         assert_eq!(factoms[0].value(), &Value::String("b".into()));
     }
@@ -1747,7 +1753,7 @@ mod tests {
             .commit()
             .unwrap()
             .unwrap();
-        let factoms = store.entity_factoms(e).unwrap();
+        let factoms = store.db().entity_factoms(e).unwrap();
         assert_eq!(factoms.len(), 1);
         assert_eq!(factoms[0].slot(), &k);
         assert_eq!(factoms[0].value(), &Value::String("b".into()));
@@ -1767,8 +1773,8 @@ mod tests {
             .commit()
             .unwrap();
         assert_eq!(result, None);
-        assert!(store.entity_factoms(e).unwrap().is_empty());
-        assert!(store.entity_history(e).unwrap().is_empty());
+        assert!(store.db().entity_factoms(e).unwrap().is_empty());
+        assert!(store.db().entity_history(e).unwrap().is_empty());
     }
 
     #[test]
@@ -1786,7 +1792,7 @@ mod tests {
             .commit()
             .unwrap()
             .unwrap();
-        let factoms = store.entity_factoms(e).unwrap();
+        let factoms = store.db().entity_factoms(e).unwrap();
         assert_eq!(factoms.len(), 1);
         assert_eq!(factoms[0].value(), &Value::String("a".into()));
     }
@@ -1804,7 +1810,7 @@ mod tests {
             .commit()
             .unwrap();
         assert_eq!(result, None);
-        assert!(store.entity_factoms(e).unwrap().is_empty());
+        assert!(store.db().entity_factoms(e).unwrap().is_empty());
     }
 
     #[test]
@@ -1840,7 +1846,7 @@ mod tests {
             .commit()
             .unwrap()
             .unwrap();
-        let factoms = store.entity_factoms(e).unwrap();
+        let factoms = store.db().entity_factoms(e).unwrap();
         assert_eq!(factoms.len(), 1);
         assert_eq!(factoms[0].slot(), &to);
         assert_eq!(factoms[0].value(), &Value::String("x".into()));
@@ -1859,7 +1865,7 @@ mod tests {
             .commit()
             .unwrap()
             .unwrap();
-        let factoms = store.entity_factoms(e).unwrap();
+        let factoms = store.db().entity_factoms(e).unwrap();
         assert_eq!(
             values(&store, e),
             vec![Value::String("a".into()), Value::String("b".into())]
@@ -1919,7 +1925,7 @@ mod tests {
             .commit()
             .unwrap()
             .unwrap();
-        let factoms = store.entity_factoms(o2).unwrap();
+        let factoms = store.db().entity_factoms(o2).unwrap();
         assert_eq!(factoms.len(), 1);
         assert_eq!(factoms[0].value(), &Value::Ref(kid));
     }
@@ -1942,7 +1948,7 @@ mod tests {
             .commit()
             .unwrap()
             .unwrap();
-        assert!(store.entity_factoms(e).unwrap().is_empty());
+        assert!(store.db().entity_factoms(e).unwrap().is_empty());
     }
 
     #[test]
@@ -1962,7 +1968,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result, None);
-        assert!(store.entity_factoms(source).unwrap().is_empty());
+        assert!(store.db().entity_factoms(source).unwrap().is_empty());
     }
 
     #[test]
@@ -1999,7 +2005,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert!(store.entity_factoms(o1).unwrap().is_empty());
+        assert!(store.db().entity_factoms(o1).unwrap().is_empty());
         assert_eq!(values(&store, o2), vec![Value::Ref(kid)]);
     }
 
@@ -2067,7 +2073,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result, None);
-        assert!(store.entity_factoms(source).unwrap().is_empty());
+        assert!(store.db().entity_factoms(source).unwrap().is_empty());
     }
 
     #[test]
@@ -2085,7 +2091,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result, None);
-        assert!(store.entity_factoms(parent).unwrap().is_empty());
-        assert!(store.entity_factoms(kid).unwrap().is_empty());
+        assert!(store.db().entity_factoms(parent).unwrap().is_empty());
+        assert!(store.db().entity_factoms(kid).unwrap().is_empty());
     }
 }

@@ -12,3 +12,5 @@ fjall = { version = "3.1.13", features = ["lz4"] }
 thiserror = "2.0.21"
 jiff = "0.2.39"
 fractional_index = { version = "2.0.2", default-features = false }
+parking_lot = "0.13.0"
+arc-swap = "1.9.5"

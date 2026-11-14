@@ -129,7 +129,11 @@ impl Store {
         }
         Ok(())
     }
-
+    /// All up-to-date assertions exist in the current indexes and the txn log only.
+    ///
+    /// When an eviction (retraction) happens we backfill history with the original assertion using the same original txn id.
+    ///
+    /// The naive approach would be to write assert to history on first assertion and write only retract during eviction but then every factom would exist in both current and history indexes, so we should never do this.
     fn write_history(
         &self,
         batch: &mut OwnedWriteBatch,
@@ -409,7 +413,7 @@ impl Store {
 
     pub fn revert_txn(&self, txn: TxnId) -> Result<Option<TxnId>> {
         let mut tx = self.transact();
-        for factom in self.tx_factoms(txn)? {
+        for factom in self.db().tx_factoms(txn)? {
             if factom.attribute() == TX_TIMESTAMP_ATTR {
                 continue;
             }
@@ -463,7 +467,7 @@ mod tests {
             .unwrap();
         let e = store.new_entity().unwrap();
         let txn = store.assert(e, name, &"alice").unwrap().unwrap();
-        let factoms = store.entity_factoms(e).unwrap();
+        let factoms = store.db().entity_factoms(e).unwrap();
         assert_eq!(factoms.len(), 1);
         assert_eq!(factoms[0].entity(), e);
         assert_eq!(factoms[0].attribute(), name);
@@ -491,7 +495,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result, None);
-        assert_eq!(store.entity_factoms(e).unwrap().len(), 1);
+        assert_eq!(store.db().entity_factoms(e).unwrap().len(), 1);
     }
 
     #[test]
@@ -503,10 +507,10 @@ mod tests {
         let e = store.new_entity().unwrap();
         let txn1 = store.assert(e, name, &"alice").unwrap().unwrap();
         let txn2 = store.assert(e, name, &"bob").unwrap().unwrap();
-        let current = store.entity_factoms(e).unwrap();
+        let current = store.db().entity_factoms(e).unwrap();
         assert_eq!(current.len(), 1);
         assert_eq!(current[0].value(), &Value::String("bob".into()));
-        let history = store.entity_history(e).unwrap();
+        let history = store.db().entity_history(e).unwrap();
         assert!(history.contains(&Factom::new(
             e,
             name,
@@ -534,8 +538,8 @@ mod tests {
         let e = store.new_entity().unwrap();
         let txn1 = store.assert(e, name, &"alice").unwrap().unwrap();
         let txn2 = store.retract(e, name, &"alice").unwrap().unwrap();
-        assert!(store.entity_factoms(e).unwrap().is_empty());
-        let history = store.entity_history(e).unwrap();
+        assert!(store.db().entity_factoms(e).unwrap().is_empty());
+        let history = store.db().entity_history(e).unwrap();
         assert!(history.contains(&Factom::new(
             e,
             name,
@@ -576,8 +580,17 @@ mod tests {
             .unwrap();
         let e = store.new_entity().unwrap();
         store.assert(e, age, &30i64).unwrap();
-        assert_eq!(store.entities_with_value(age, &30i64).unwrap(), vec![e]);
-        assert!(store.entities_with_value(age, &31i64).unwrap().is_empty());
+        assert_eq!(
+            store.db().entities_with_value(age, &30i64).unwrap(),
+            vec![e]
+        );
+        assert!(
+            store
+                .db()
+                .entities_with_value(age, &31i64)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -589,8 +602,8 @@ mod tests {
         let a = store.new_entity().unwrap();
         let b = store.new_entity().unwrap();
         store.assert(a, friend, &b).unwrap();
-        assert_eq!(store.referring_entities(b, friend).unwrap(), vec![a]);
-        assert!(store.referring_entities(a, friend).unwrap().is_empty());
+        assert_eq!(store.db().referring_entities(b, friend).unwrap(), vec![a]);
+        assert!(store.db().referring_entities(a, friend).unwrap().is_empty());
     }
 
     #[test]
@@ -601,7 +614,7 @@ mod tests {
             .unwrap();
         let e = store.new_entity().unwrap();
         let txn = store.assert(e, name, &"alice").unwrap().unwrap();
-        let factoms = store.tx_factoms(txn).unwrap();
+        let factoms = store.db().tx_factoms(txn).unwrap();
         assert_eq!(factoms.len(), 2);
         assert!(
             factoms
@@ -625,9 +638,9 @@ mod tests {
         let txn1 = store.assert(e, name, &"alice").unwrap().unwrap();
 
         let reverted = store.revert_txn(txn1).unwrap().unwrap();
-        assert!(store.entity_factoms(e).unwrap().is_empty());
+        assert!(store.db().entity_factoms(e).unwrap().is_empty());
 
-        let history = store.entity_history(e).unwrap();
+        let history = store.db().entity_history(e).unwrap();
         assert!(history.contains(&Factom::new(
             e,
             name,
@@ -657,7 +670,7 @@ mod tests {
         let txn2 = store.assert(e, name, &"bob").unwrap().unwrap();
 
         store.revert_txn(txn2).unwrap();
-        let current = store.entity_factoms(e).unwrap();
+        let current = store.db().entity_factoms(e).unwrap();
         assert_eq!(current.len(), 1);
         assert_eq!(current[0].value(), &Value::String("alice".into()));
     }
@@ -673,7 +686,7 @@ mod tests {
         let txn2 = store.retract(e, name, &"alice").unwrap().unwrap();
 
         store.revert_txn(txn2).unwrap();
-        let current = store.entity_factoms(e).unwrap();
+        let current = store.db().entity_factoms(e).unwrap();
         assert_eq!(current.len(), 1);
         assert_eq!(current[0].value(), &Value::String("alice".into()));
     }
@@ -688,7 +701,10 @@ mod tests {
         let txn1 = store.assert(e, name, &"alice").unwrap().unwrap();
 
         store.revert_txn(txn1).unwrap();
-        assert_eq!(store.entity_factoms(txn1.entity_id()).unwrap().len(), 1);
+        assert_eq!(
+            store.db().entity_factoms(txn1.entity_id()).unwrap().len(),
+            1
+        );
     }
 
     #[test]
@@ -708,10 +724,10 @@ mod tests {
             .commit()
             .unwrap()
             .unwrap();
-        let factoms = store.entity_factoms(e).unwrap();
+        let factoms = store.db().entity_factoms(e).unwrap();
         assert_eq!(factoms.len(), 2);
         assert!(factoms.iter().all(|f| f.txn() == txn));
-        assert_eq!(store.tx_factoms(txn).unwrap().len(), 3);
+        assert_eq!(store.db().tx_factoms(txn).unwrap().len(), 3);
     }
 
     #[test]
@@ -732,7 +748,7 @@ mod tests {
             .commit()
             .unwrap()
             .unwrap();
-        let logged = store.tx_factoms(txn).unwrap();
+        let logged = store.db().tx_factoms(txn).unwrap();
         assert_eq!(logged.len(), 2);
         assert!(
             logged
@@ -759,8 +775,8 @@ mod tests {
             .unwrap()
             .unwrap();
         let reverted = store.revert_txn(txn1).unwrap().unwrap();
-        assert!(store.entity_factoms(e).unwrap().is_empty());
-        let logged = store.tx_factoms(reverted).unwrap();
+        assert!(store.db().entity_factoms(e).unwrap().is_empty());
+        let logged = store.db().tx_factoms(reverted).unwrap();
         assert_eq!(logged.len(), 3);
         assert_eq!(logged.iter().filter(|f| f.op() == Op::Retract).count(), 2);
     }
@@ -774,11 +790,11 @@ mod tests {
         let e = store.new_entity().unwrap();
         store.assert(e, tags, &"a").unwrap().unwrap();
         store.assert(e, tags, &"b").unwrap().unwrap();
-        assert_eq!(store.entity_factoms(e).unwrap().len(), 2);
+        assert_eq!(store.db().entity_factoms(e).unwrap().len(), 2);
         assert_eq!(store.assert(e, tags, &"a").unwrap(), None);
-        assert_eq!(store.entity_factoms(e).unwrap().len(), 2);
+        assert_eq!(store.db().entity_factoms(e).unwrap().len(), 2);
         store.retract(e, tags, &"a").unwrap().unwrap();
-        let factoms = store.entity_factoms(e).unwrap();
+        let factoms = store.db().entity_factoms(e).unwrap();
         assert_eq!(factoms.len(), 1);
         assert_eq!(factoms[0].value(), &Value::String("b".into()));
     }
@@ -806,14 +822,14 @@ mod tests {
             .assert_at(e, items, k1.clone(), &"c")
             .unwrap()
             .unwrap();
-        let factoms = store.entity_factoms(e).unwrap();
+        let factoms = store.db().entity_factoms(e).unwrap();
         assert_eq!(factoms.len(), 2);
         assert_eq!(factoms[0].slot(), &k1);
         assert_eq!(factoms[0].value(), &Value::String("c".into()));
         assert_eq!(factoms[1].slot(), &k2);
         assert_eq!(factoms[1].value(), &Value::String("b".into()));
         store.retract_at(e, items, k2, &"b").unwrap().unwrap();
-        assert_eq!(store.entity_factoms(e).unwrap().len(), 1);
+        assert_eq!(store.db().entity_factoms(e).unwrap().len(), 1);
     }
 
     #[test]
@@ -840,7 +856,7 @@ mod tests {
             .assert_at(e, scores, ka.clone(), &3i64)
             .unwrap()
             .unwrap();
-        let factoms = store.entity_factoms(e).unwrap();
+        let factoms = store.db().entity_factoms(e).unwrap();
         assert_eq!(factoms.len(), 2);
         assert_eq!(factoms[0].slot(), &ka);
         assert_eq!(factoms[0].value(), &Value::Long(3));

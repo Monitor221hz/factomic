@@ -1,20 +1,27 @@
 use std::collections::HashMap;
 
+use fjall::Readable;
+
 use crate::error::{Error, Result};
 use crate::factom::{Factom, Op, Slot};
 use crate::id::{AttributeId, EntityId, TxnId};
 use crate::primitive::EncodePrimitive;
-use crate::store::Store;
+use crate::store::Db;
 use crate::value::tag_for_type;
 use crate::{Value, keys};
 
+pub struct FactValue {
+    value: Value,
+    slot: Slot,
+    txn: TxnId,
+}
 // todo: support slots
 pub struct EntityView {
     id: EntityId,
     map: HashMap<u16, Value>,
 }
 
-impl Store {
+impl Db {
     pub fn slot_at(
         &self,
         entity: EntityId,
@@ -22,8 +29,8 @@ impl Store {
         ordinal: usize,
     ) -> Result<Option<Slot>> {
         let Some(guard) = self
-            .easvt
-            .prefix(keys::easvt_entity_attr_prefix(entity, attr))
+            .snapshot
+            .prefix(&self.easvt, keys::easvt_entity_attr_prefix(entity, attr))
             .nth(ordinal)
         else {
             return Ok(None);
@@ -35,7 +42,10 @@ impl Store {
 
     pub fn entity_factoms(&self, entity: EntityId) -> Result<Vec<Factom>> {
         let mut factoms = Vec::new();
-        for item in self.easvt.prefix(keys::easvt_entity_prefix(entity)) {
+        for item in self
+            .snapshot
+            .prefix(&self.easvt, keys::easvt_entity_prefix(entity))
+        {
             let (key, payload) = item.into_inner()?;
             let (e, a, k, v) = keys::decode_easvt_key(&key)?;
             let txn = TxnId::with_value(u64::from_be_bytes(payload[..8].try_into().unwrap()));
@@ -46,7 +56,10 @@ impl Store {
 
     pub fn entity(&self, entity: EntityId) -> Result<EntityView> {
         let mut map: HashMap<u16, Value> = HashMap::new();
-        for item in self.easvt.prefix(keys::easvt_entity_prefix(entity)) {
+        for item in self
+            .snapshot
+            .prefix(&self.easvt, keys::easvt_entity_prefix(entity))
+        {
             let (key, _) = item.into_inner()?;
             let (_, a, _, v) = keys::decode_easvt_key(&key)?;
             map.insert(a.as_u16(), v);
@@ -56,7 +69,10 @@ impl Store {
 
     pub fn entity_history(&self, entity: EntityId) -> Result<Vec<Factom>> {
         let mut factoms = Vec::new();
-        for item in self.easvt_h.prefix(keys::easvt_entity_prefix(entity)) {
+        for item in self
+            .snapshot
+            .prefix(&self.easvt_h, keys::easvt_entity_prefix(entity))
+        {
             let (key, payload) = item.into_inner()?;
             let (e, a, k, v, txn) = keys::decode_easvt_history_key(&key)?;
             let op = Op::try_from(payload[0])?;
@@ -83,8 +99,8 @@ impl Store {
         value.encode(&mut region);
         let mut entities = Vec::new();
         for item in self
-            .avest
-            .prefix(keys::avest_value_prefix(attribute, &region))
+            .snapshot
+            .prefix(&self.avest, keys::avest_value_prefix(attribute, &region))
         {
             let (key, _) = item.into_inner()?;
             let (_, _, entity, _) = keys::decode_avest_key(&key)?;
@@ -99,10 +115,10 @@ impl Store {
         attribute: AttributeId,
     ) -> Result<Vec<EntityId>> {
         let mut entities = Vec::new();
-        for item in self
-            .vaest
-            .prefix(keys::vaest_target_attr_prefix(target, attribute))
-        {
+        for item in self.snapshot.prefix(
+            &self.vaest,
+            keys::vaest_target_attr_prefix(target, attribute),
+        ) {
             let (key, _) = item.into_inner()?;
             let (_, _, source, _) = keys::decode_vaest_key(&key)?;
             entities.push(source);
@@ -112,7 +128,7 @@ impl Store {
 
     pub fn tx_factoms(&self, txn: TxnId) -> Result<Vec<Factom>> {
         let mut factoms = Vec::new();
-        for item in self.txlog.prefix(keys::txlog_prefix(txn)) {
+        for item in self.snapshot.prefix(&self.txlog, keys::txlog_prefix(txn)) {
             let (key, payload) = item.into_inner()?;
             let (txn, entity, attribute, k, value) = keys::decode_txlog_key(&key)?;
             let op = Op::try_from(payload[0])?;
