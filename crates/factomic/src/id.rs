@@ -84,6 +84,12 @@ impl TxnId {
     pub fn entity_id(&self) -> EntityId {
         EntityId::with_value(self.as_u64())
     }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self::with_value(u64::from_be_bytes(
+            bytes[..size_of::<TxnId>()].try_into().unwrap(),
+        ))
+    }
 }
 
 #[cfg(test)]

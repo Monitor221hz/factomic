@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use fjall::Readable;
@@ -10,18 +11,76 @@ use crate::store::Db;
 use crate::value::tag_for_type;
 use crate::{Value, keys};
 
-pub struct FactValue {
-    value: Value,
-    slot: Slot,
+//todo: zero copy identities?
+struct Candidate {
+    identity: Vec<u8>, // key without txn component
     txn: TxnId,
+    op: Op,
 }
-// todo: support slots
-pub struct EntityView {
-    id: EntityId,
-    map: HashMap<u16, Value>,
+
+fn candidate_cmp(a: &Candidate, b: &Candidate) -> Ordering {
+    a.identity.cmp(&b.identity).then_with(|| a.txn.cmp(&b.txn)) //uuuugh idk maybe keep compound keys and lexo-compare. do we even need Candidate
+}
+
+struct Fact {
+    identity: Vec<u8>,
+    asserted_at: TxnId,
 }
 
 impl Db {
+    fn current_candidates(&self, entity: EntityId) -> impl Iterator<Item = Result<Candidate>> {
+        self.snapshot
+            .prefix(&self.easvt, keys::easvt_entity_prefix(entity))
+            .map(|item| {
+                let (key, payload) = item.into_inner()?;
+                Ok(Candidate {
+                    identity: key.to_vec(),
+                    txn: TxnId::from_bytes(&payload),
+                    op: Op::Assert,
+                })
+            })
+    }
+
+    fn historical_candidates(&self, entity: EntityId) -> impl Iterator<Item = Result<Candidate>> {
+        self.snapshot
+            .prefix(&self.easvt, keys::easvt_entity_prefix(entity))
+            .map(|item| {
+                let (key, payload) = item.into_inner()?;
+
+                let txn_start = key.len() - size_of::<TxnId>();
+
+                Ok(Candidate {
+                    identity: key[..txn_start].to_vec(),
+                    txn: TxnId::from_bytes(&key[txn_start..]),
+                    op: Op::try_from(payload[0])?,
+                })
+            })
+    }
+
+    fn merge_candidates(
+        current: impl Iterator<Item = Result<Candidate>>,
+        history: impl Iterator<Item = Result<Candidate>>,
+    ) -> impl Iterator<Item = Result<Candidate>> {
+        let mut current = current.peekable();
+        let mut history = history.peekable();
+
+        std::iter::from_fn(move || {
+            let take_current = match (current.peek(), history.peek()) {
+                (None, None) => return None,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (Some(Ok(c)), Some(Ok(h))) => candidate_cmp(c, h).is_le(),
+                (Some(Err(_)), _) => true,
+                (_, Some(Err(_))) => false,
+            };
+            if take_current {
+                current.next()
+            } else {
+                history.next()
+            }
+        })
+    }
+
     pub fn slot_at(
         &self,
         entity: EntityId,
@@ -52,19 +111,6 @@ impl Db {
             factoms.push(Factom::new(e, a, k, v, txn, Op::Assert));
         }
         Ok(factoms)
-    }
-
-    pub fn entity(&self, entity: EntityId) -> Result<EntityView> {
-        let mut map: HashMap<u16, Value> = HashMap::new();
-        for item in self
-            .snapshot
-            .prefix(&self.easvt, keys::easvt_entity_prefix(entity))
-        {
-            let (key, _) = item.into_inner()?;
-            let (_, a, _, v) = keys::decode_easvt_key(&key)?;
-            map.insert(a.as_u16(), v);
-        }
-        Ok(EntityView { id: entity, map })
     }
 
     pub fn entity_history(&self, entity: EntityId) -> Result<Vec<Factom>> {

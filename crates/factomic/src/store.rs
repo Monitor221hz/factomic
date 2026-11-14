@@ -33,6 +33,7 @@ const META_ENTITY_PREFIX: u8 = 0x02;
 
 pub struct Db {
     txn: TxnId,
+    as_of: Option<TxnId>,
     snapshot: fjall::Snapshot,
     attrs: Keyspace,
     easvt: Keyspace,
@@ -47,6 +48,11 @@ pub struct Db {
 } //todo: multi reader/single writer affirming tests
 
 impl Db {
+    pub fn at(&mut self, txn: TxnId) -> &Self {
+        self.as_of = Some(txn);
+        self
+    }
+
     pub fn attribute_def(&self, id: AttributeId) -> Result<AttributeDef> {
         let payload = self
             .snapshot
@@ -145,6 +151,7 @@ impl Store {
         self.current.store(
             Db {
                 txn,
+                as_of: None,
                 snapshot: self.db.snapshot(),
                 attrs: self.attrs.clone(),
                 easvt: self.easvt.clone(),
@@ -180,6 +187,7 @@ impl Store {
         let txlog = db.keyspace("txlog", KeyspaceCreateOptions::default)?;
         let snapshot = ArcSwap::from_pointee(Db {
             txn: TxnId::with_value(0),
+            as_of: None,
             snapshot: db.snapshot(),
             attrs: attrs.clone(),
             easvt: easvt.clone(),
