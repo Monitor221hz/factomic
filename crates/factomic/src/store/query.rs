@@ -87,7 +87,7 @@ where
 impl Db {
     fn visible_easvt(
         &self,
-        prefix: Vec<u8>,
+        prefix: &[u8],
         cutoff: TxnId,
     ) -> impl Iterator<Item = Result<(Vec<u8>, TxnId)>> {
         let current = self
@@ -159,7 +159,7 @@ impl Db {
     ) -> Result<Option<Slot>> {
         let prefix = keys::easvt_entity_attr_prefix(entity, attr);
         if let Some(cutoff) = self.as_of {
-            let Some(item) = self.visible_easvt(prefix, cutoff).nth(ordinal) else {
+            let Some(item) = self.visible_easvt(&prefix, cutoff).nth(ordinal) else {
                 return Ok(None);
             };
             let (key, _) = item?;
@@ -202,8 +202,31 @@ impl Db {
         Ok(None)
     }
 
-    pub fn entity_factoms(&self, entity: EntityId) -> Result<Vec<Factom>> {
-        let prefix = keys::easvt_entity_prefix(entity);
+    fn prefix_entity_factom(&self, prefix: &[u8]) -> Result<Option<Factom>> {
+        if let Some(cutoff) = self.as_of {
+            self.visible_easvt(prefix, cutoff)
+                .next()
+                .map(|item| {
+                    let (key, asserted_at) = item?;
+                    let (e, a, k, v, _) = keys::decode_easvt_history_key(&key)?;
+                    Ok(Factom::new(e, a, k, v, asserted_at, Op::Assert))
+                })
+                .transpose()
+        } else {
+            self.snapshot
+                .prefix(&self.easvt, prefix)
+                .next()
+                .map(|item| {
+                    let (key, payload) = item.into_inner()?;
+                    let (e, a, k, v) = keys::decode_easvt_key(&key)?;
+                    let txn = TxnId::try_from(payload.as_ref())?;
+                    Ok(Factom::new(e, a, k, v, txn, Op::Assert))
+                })
+                .transpose()
+        }
+    }
+
+    fn prefix_entity_factoms(&self, prefix: &[u8]) -> Result<Vec<Factom>> {
         let mut factoms = Vec::new();
         if let Some(cutoff) = self.as_of {
             for item in self.visible_easvt(prefix, cutoff) {
@@ -221,6 +244,33 @@ impl Db {
             factoms.push(Factom::new(e, a, k, v, txn, Op::Assert));
         }
         Ok(factoms)
+    }
+
+    pub fn entity_factoms(&self, entity: EntityId) -> Result<Vec<Factom>> {
+        self.prefix_entity_factoms(&keys::easvt_entity_prefix(entity))
+    }
+
+    pub fn entity_attr_factoms(&self, entity: EntityId, attr: AttributeId) -> Result<Vec<Factom>> {
+        self.prefix_entity_factoms(&keys::easvt_entity_attr_prefix(entity, attr))
+    }
+
+    pub fn entity_value<T>(&self, entity: EntityId, attr: AttributeId) -> Result<Option<T>>
+    where
+        T: for<'a> TryFrom<&'a Value, Error = crate::Error>,
+    {
+        self.prefix_entity_factom(&keys::easvt_entity_attr_prefix(entity, attr))?
+            .map(|f| f.try_value())
+            .transpose()
+    }
+
+    pub fn entity_values<T>(&self, entity: EntityId, attr: AttributeId) -> Result<Vec<T>>
+    where
+        T: for<'a> TryFrom<&'a Value, Error = crate::Error>,
+    {
+        self.prefix_entity_factoms(&keys::easvt_entity_attr_prefix(entity, attr))?
+            .into_iter()
+            .map(|f| f.try_value::<T>())
+            .collect()
     }
 
     pub fn entity_history(&self, entity: EntityId) -> Result<Vec<Factom>> {

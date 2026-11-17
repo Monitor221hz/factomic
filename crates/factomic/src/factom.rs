@@ -318,6 +318,13 @@ impl Factom {
     pub fn op(&self) -> Op {
         self.op
     }
+
+    pub fn try_value<'a, T>(&'a self) -> Result<T>
+    where
+        T: TryFrom<&'a Value, Error = crate::Error>,
+    {
+        T::try_from(self.value())
+    }
 }
 
 #[cfg(test)]

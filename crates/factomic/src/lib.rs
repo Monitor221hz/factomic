@@ -20,6 +20,7 @@ mod factom;
 mod id;
 mod keys;
 mod primitive;
+mod schema;
 mod store;
 mod value;
 
