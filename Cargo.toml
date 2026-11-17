@@ -14,3 +14,4 @@ jiff = "0.2.39"
 fractional_index = { version = "2.0.2", default-features = false }
 parking_lot = "0.13.0"
 arc-swap = "1.9.5"
+itertools = "0.15.0"

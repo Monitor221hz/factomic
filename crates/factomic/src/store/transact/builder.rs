@@ -6,16 +6,13 @@ use std::{
 use fjall::OwnedWriteBatch;
 use fractional_index::FractionalIndex;
 
+use crate::error::{Error, Result};
 use crate::factom::{ASSERT, CollectionKind, MapKey, Op, RETRACT, Slot};
 use crate::id::{AttributeId, EntityId, TxnId};
 use crate::keys;
 use crate::primitive::{DecodePrimitive, EncodePrimitive};
 use crate::store::{AttributeDef, Store};
 use crate::value::{TAG_REF, Type, Value};
-use crate::{
-    error::{Error, Result},
-    store::Db,
-};
 
 use super::{FactomRef, check_key, check_type, encode_region, ref_target, value_region};
 

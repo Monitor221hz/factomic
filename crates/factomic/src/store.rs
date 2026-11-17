@@ -48,9 +48,44 @@ pub struct Db {
 } //todo: multi reader/single writer affirming tests
 
 impl Db {
-    pub fn at(&mut self, txn: TxnId) -> &Self {
-        self.as_of = Some(txn);
-        self
+    /// Returns a read-only view of this database as it existed at the moment after `txn` was appended.
+    /// In other words, it returns all transactions before and including the cutoff.
+    pub fn at(self: &Arc<Self>, txn: TxnId) -> Arc<Self> {
+        Arc::new(Self {
+            txn: self.txn,
+            as_of: Some(txn),
+            snapshot: self.snapshot.clone(),
+            attrs: self.attrs.clone(),
+            easvt: self.easvt.clone(),
+            aesvt: self.aesvt.clone(),
+            avest: self.avest.clone(),
+            vaest: self.vaest.clone(),
+            easvt_h: self.easvt_h.clone(),
+            aesvt_h: self.aesvt_h.clone(),
+            avest_h: self.avest_h.clone(),
+            vaest_h: self.vaest_h.clone(),
+            txlog: self.txlog.clone(),
+        })
+    }
+
+    /// Returns an up-to-date snapshot as it existed after the most recent transaction.
+    /// This returns an identical clone if the original self was already the latest snapshot.
+    pub fn current(self: &Arc<Self>) -> Arc<Self> {
+        Arc::new(Self {
+            txn: self.txn,
+            as_of: None,
+            snapshot: self.snapshot.clone(),
+            attrs: self.attrs.clone(),
+            easvt: self.easvt.clone(),
+            aesvt: self.aesvt.clone(),
+            avest: self.avest.clone(),
+            vaest: self.vaest.clone(),
+            easvt_h: self.easvt_h.clone(),
+            aesvt_h: self.aesvt_h.clone(),
+            avest_h: self.avest_h.clone(),
+            vaest_h: self.vaest_h.clone(),
+            txlog: self.txlog.clone(),
+        })
     }
 
     pub fn attribute_def(&self, id: AttributeId) -> Result<AttributeDef> {
@@ -145,6 +180,12 @@ fn by_name_value(attr_id: AttributeId) -> [u8; size_of::<AttributeId>()] {
 impl Store {
     pub fn db(&self) -> Arc<Db> {
         self.current.load().clone()
+    }
+
+    /// Returns a read-only database as it existed at the moment after `txn` was appended.
+    /// In other words, it returns all transactions before and including the cutoff.
+    pub fn db_at(&self, txn: TxnId) -> Arc<Db> {
+        self.current.load().at(txn)
     }
 
     pub(crate) fn swap(&self, txn: TxnId) {

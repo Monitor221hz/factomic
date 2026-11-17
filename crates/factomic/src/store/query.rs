@@ -1,84 +1,163 @@
-use std::cmp::Ordering;
-use std::collections::HashMap;
-
 use fjall::Readable;
+use itertools::Itertools;
 
 use crate::error::{Error, Result};
 use crate::factom::{Factom, Op, Slot};
 use crate::id::{AttributeId, EntityId, TxnId};
+use crate::keys;
 use crate::primitive::EncodePrimitive;
 use crate::store::Db;
 use crate::value::tag_for_type;
-use crate::{Value, keys};
 
-//todo: zero copy identities?
-struct Candidate {
-    identity: Vec<u8>, // key without txn component
-    txn: TxnId,
-    op: Op,
+const TXN_LEN: usize = size_of::<TxnId>();
+
+fn decode_txn(bytes: &[u8]) -> Result<TxnId> {
+    if bytes.len() != TXN_LEN {
+        return Err(Error::CorruptKey {
+            expected: TXN_LEN,
+            got: bytes.len(),
+        });
+    }
+    Ok(TxnId::with_value(u64::from_be_bytes(
+        bytes.try_into().unwrap(),
+    )))
 }
 
-fn candidate_cmp(a: &Candidate, b: &Candidate) -> Ordering {
-    a.identity.cmp(&b.identity).then_with(|| a.txn.cmp(&b.txn)) //uuuugh idk maybe keep compound keys and lexo-compare. do we even need Candidate
+fn current_candidate(key: &[u8], payload: &[u8]) -> Result<(Vec<u8>, Op)> {
+    let txn = decode_txn(payload)?;
+    let mut temporal_key = keys::encode_history_identity(key); // add 0x00 00
+    temporal_key.reserve_exact(TXN_LEN);
+    temporal_key.extend_from_slice(&txn.to_be_bytes());
+    Ok((temporal_key, Op::Assert))
 }
 
-struct Fact {
-    identity: Vec<u8>,
-    asserted_at: TxnId,
+fn historical_candidate(key: &[u8], payload: &[u8]) -> Result<(Vec<u8>, Op)> {
+    if key.len() < TXN_LEN {
+        return Err(Error::CorruptKey {
+            expected: TXN_LEN,
+            got: key.len(),
+        });
+    }
+    if payload.len() != 1 {
+        return Err(Error::CorruptKey {
+            expected: 1,
+            got: payload.len(),
+        });
+    }
+    Ok((key.to_vec(), Op::try_from(payload[0])?))
+}
+
+fn identity(temporal_key: &[u8]) -> &[u8] {
+    &temporal_key[..temporal_key.len() - TXN_LEN]
+}
+
+fn txn(temporal_key: &[u8]) -> TxnId {
+    TxnId::with_value(u64::from_be_bytes(
+        temporal_key[temporal_key.len() - TXN_LEN..]
+            .try_into()
+            .unwrap(),
+    ))
+}
+
+fn visible_at<C, H>(
+    current: C,
+    history: H,
+    cutoff: TxnId,
+) -> impl Iterator<Item = Result<(Vec<u8>, TxnId)>>
+where
+    C: Iterator<Item = Result<(Vec<u8>, Op)>>,
+    H: Iterator<Item = Result<(Vec<u8>, Op)>>,
+{
+    current
+        .merge_by(history, |a, b| match (a, b) {
+            (Ok(a), Ok(b)) => a.0 <= b.0,
+            (Err(_), _) => true,
+            (_, Err(_)) => false,
+        })
+        .coalesce(move |winner, next| match (winner, next) {
+            (Ok(winner), Ok(next)) => {
+                if identity(&winner.0) == identity(&next.0) {
+                    Ok(Ok(if txn(&next.0) <= cutoff { next } else { winner }))
+                } else {
+                    Err((Ok(winner), Ok(next)))
+                }
+            }
+            (winner, next) => Err((winner, next)),
+        })
+        .filter_map(move |candidate| match candidate {
+            Err(error) => Some(Err(error)),
+            Ok((key, op)) => {
+                let asserted_at = txn(&key);
+                (op == Op::Assert && asserted_at <= cutoff).then_some(Ok((key, asserted_at)))
+            }
+        })
 }
 
 impl Db {
-    fn current_candidates(&self, entity: EntityId) -> impl Iterator<Item = Result<Candidate>> {
-        self.snapshot
-            .prefix(&self.easvt, keys::easvt_entity_prefix(entity))
+    fn visible_easvt(
+        &self,
+        prefix: Vec<u8>,
+        cutoff: TxnId,
+    ) -> impl Iterator<Item = Result<(Vec<u8>, TxnId)>> {
+        let current = self
+            .snapshot
+            .prefix(&self.easvt, prefix.clone())
             .map(|item| {
                 let (key, payload) = item.into_inner()?;
-                Ok(Candidate {
-                    identity: key.to_vec(),
-                    txn: TxnId::from_bytes(&payload),
-                    op: Op::Assert,
-                })
-            })
-    }
-
-    fn historical_candidates(&self, entity: EntityId) -> impl Iterator<Item = Result<Candidate>> {
-        self.snapshot
-            .prefix(&self.easvt, keys::easvt_entity_prefix(entity))
+                current_candidate(&key, &payload)
+            });
+        let history = self
+            .snapshot
+            .prefix(&self.easvt_h, keys::escape_identity(&prefix))
             .map(|item| {
                 let (key, payload) = item.into_inner()?;
-
-                let txn_start = key.len() - size_of::<TxnId>();
-
-                Ok(Candidate {
-                    identity: key[..txn_start].to_vec(),
-                    txn: TxnId::from_bytes(&key[txn_start..]),
-                    op: Op::try_from(payload[0])?,
-                })
-            })
+                historical_candidate(&key, &payload)
+            });
+        visible_at(current, history, cutoff)
     }
 
-    fn merge_candidates(
-        current: impl Iterator<Item = Result<Candidate>>,
-        history: impl Iterator<Item = Result<Candidate>>,
-    ) -> impl Iterator<Item = Result<Candidate>> {
-        let mut current = current.peekable();
-        let mut history = history.peekable();
+    fn visible_avest(
+        &self,
+        prefix: Vec<u8>,
+        cutoff: TxnId,
+    ) -> impl Iterator<Item = Result<(Vec<u8>, TxnId)>> {
+        let current = self
+            .snapshot
+            .prefix(&self.avest, prefix.clone())
+            .map(|item| {
+                let (key, payload) = item.into_inner()?;
+                current_candidate(&key, &payload)
+            });
+        let history = self
+            .snapshot
+            .prefix(&self.avest_h, keys::escape_identity(&prefix))
+            .map(|item| {
+                let (key, payload) = item.into_inner()?;
+                historical_candidate(&key, &payload)
+            });
+        visible_at(current, history, cutoff)
+    }
 
-        std::iter::from_fn(move || {
-            let take_current = match (current.peek(), history.peek()) {
-                (None, None) => return None,
-                (Some(_), None) => true,
-                (None, Some(_)) => false,
-                (Some(Ok(c)), Some(Ok(h))) => candidate_cmp(c, h).is_le(),
-                (Some(Err(_)), _) => true,
-                (_, Some(Err(_))) => false,
-            };
-            if take_current {
-                current.next()
-            } else {
-                history.next()
-            }
-        })
+    fn visible_vaest(
+        &self,
+        prefix: Vec<u8>,
+        cutoff: TxnId,
+    ) -> impl Iterator<Item = Result<(Vec<u8>, TxnId)>> {
+        let current = self
+            .snapshot
+            .prefix(&self.vaest, prefix.clone())
+            .map(|item| {
+                let (key, payload) = item.into_inner()?;
+                current_candidate(&key, &payload)
+            });
+        let history = self
+            .snapshot
+            .prefix(&self.vaest_h, keys::escape_identity(&prefix))
+            .map(|item| {
+                let (key, payload) = item.into_inner()?;
+                historical_candidate(&key, &payload)
+            });
+        visible_at(current, history, cutoff)
     }
 
     pub fn slot_at(
@@ -87,27 +166,40 @@ impl Db {
         attr: AttributeId,
         ordinal: usize,
     ) -> Result<Option<Slot>> {
-        let Some(guard) = self
-            .snapshot
-            .prefix(&self.easvt, keys::easvt_entity_attr_prefix(entity, attr))
-            .nth(ordinal)
-        else {
+        let prefix = keys::easvt_entity_attr_prefix(entity, attr);
+        if let Some(cutoff) = self.as_of {
+            let Some(item) = self.visible_easvt(prefix, cutoff).nth(ordinal) else {
+                return Ok(None);
+            };
+            let (key, _) = item?;
+            let (_, _, slot, _, _) = keys::decode_easvt_history_key(&key)?;
+            return Ok(Some(slot));
+        }
+
+        let Some(guard) = self.snapshot.prefix(&self.easvt, prefix).nth(ordinal) else {
             return Ok(None);
         };
         let (key, _) = guard.into_inner()?;
-        let (slot, _) = Slot::decode_key(&key[size_of::<EntityId>() + size_of::<AttributeId>()..])?;
+        let (_, _, slot, _) = keys::decode_easvt_key(&key)?;
         Ok(Some(slot))
     }
 
     pub fn entity_factoms(&self, entity: EntityId) -> Result<Vec<Factom>> {
+        let prefix = keys::easvt_entity_prefix(entity);
         let mut factoms = Vec::new();
-        for item in self
-            .snapshot
-            .prefix(&self.easvt, keys::easvt_entity_prefix(entity))
-        {
+        if let Some(cutoff) = self.as_of {
+            for item in self.visible_easvt(prefix, cutoff) {
+                let (key, asserted_at) = item?;
+                let (e, a, k, v, _) = keys::decode_easvt_history_key(&key)?;
+                factoms.push(Factom::new(e, a, k, v, asserted_at, Op::Assert));
+            }
+            return Ok(factoms);
+        }
+
+        for item in self.snapshot.prefix(&self.easvt, prefix) {
             let (key, payload) = item.into_inner()?;
             let (e, a, k, v) = keys::decode_easvt_key(&key)?;
-            let txn = TxnId::with_value(u64::from_be_bytes(payload[..8].try_into().unwrap()));
+            let txn = decode_txn(&payload)?;
             factoms.push(Factom::new(e, a, k, v, txn, Op::Assert));
         }
         Ok(factoms)
@@ -115,10 +207,10 @@ impl Db {
 
     pub fn entity_history(&self, entity: EntityId) -> Result<Vec<Factom>> {
         let mut factoms = Vec::new();
-        for item in self
-            .snapshot
-            .prefix(&self.easvt_h, keys::easvt_entity_prefix(entity))
-        {
+        for item in self.snapshot.prefix(
+            &self.easvt_h,
+            keys::escape_identity(&keys::easvt_entity_prefix(entity)),
+        ) {
             let (key, payload) = item.into_inner()?;
             let (e, a, k, v, txn) = keys::decode_easvt_history_key(&key)?;
             let op = Op::try_from(payload[0])?;
@@ -143,11 +235,18 @@ impl Db {
         let mut region = Vec::with_capacity(9);
         region.push(tag_for_type(V::TYPE));
         value.encode(&mut region);
+        let prefix = keys::avest_value_prefix(attribute, &region);
         let mut entities = Vec::new();
-        for item in self
-            .snapshot
-            .prefix(&self.avest, keys::avest_value_prefix(attribute, &region))
-        {
+        if let Some(cutoff) = self.as_of {
+            for item in self.visible_avest(prefix, cutoff) {
+                let (key, _) = item?;
+                let (_, _, entity, _, _) = keys::decode_avest_history_key(&key)?;
+                entities.push(entity);
+            }
+            return Ok(entities);
+        }
+
+        for item in self.snapshot.prefix(&self.avest, prefix) {
             let (key, _) = item.into_inner()?;
             let (_, _, entity, _) = keys::decode_avest_key(&key)?;
             entities.push(entity);
@@ -160,11 +259,18 @@ impl Db {
         target: EntityId,
         attribute: AttributeId,
     ) -> Result<Vec<EntityId>> {
+        let prefix = keys::vaest_target_attr_prefix(target, attribute);
         let mut entities = Vec::new();
-        for item in self.snapshot.prefix(
-            &self.vaest,
-            keys::vaest_target_attr_prefix(target, attribute),
-        ) {
+        if let Some(cutoff) = self.as_of {
+            for item in self.visible_vaest(prefix, cutoff) {
+                let (key, _) = item?;
+                let (_, _, source, _, _) = keys::decode_vaest_history_key(&key)?;
+                entities.push(source);
+            }
+            return Ok(entities);
+        }
+
+        for item in self.snapshot.prefix(&self.vaest, prefix) {
             let (key, _) = item.into_inner()?;
             let (_, _, source, _) = keys::decode_vaest_key(&key)?;
             entities.push(source);
@@ -181,5 +287,196 @@ impl Db {
             factoms.push(Factom::new(entity, attribute, k, value, txn, op));
         }
         Ok(factoms)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::factom::CollectionKind;
+    use crate::store::{AttributeDef, Store};
+    use crate::value::{Type, Value};
+
+    fn temp_store() -> (TempDir, Store) {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        (dir, store)
+    }
+
+    fn def(name: &str, value_type: Type, kind: CollectionKind) -> AttributeDef {
+        AttributeDef {
+            name: name.into(),
+            value_type,
+            kind,
+            key_type: None,
+            indexed: false,
+            is_component: false,
+        }
+    }
+
+    #[test]
+    fn entity_factoms_as_of_reconstructs_reasserted_fact() {
+        let (_dir, store) = temp_store();
+        let entity = store.new_entity().unwrap();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::Many))
+            .unwrap();
+
+        let t1 = store.assert(entity, name, &"alice").unwrap().unwrap();
+        let t2 = store.retract(entity, name, &"alice").unwrap().unwrap();
+        let t3 = store.assert(entity, name, &"alice").unwrap().unwrap();
+        let db = store.db();
+        let at_t1 = db.at(t1);
+
+        let before_t1 = db.at(TxnId::with_value(t1.as_u64() - 1));
+        assert!(before_t1.entity_factoms(entity).unwrap().is_empty());
+
+        let facts = at_t1.entity_factoms(entity).unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].txn(), t1);
+        assert_eq!(facts[0].value(), &Value::String("alice".into()));
+        assert!(db.at(t2).entity_factoms(entity).unwrap().is_empty());
+
+        let facts = db.at(t3).entity_factoms(entity).unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].txn(), t3);
+
+        store.retract(entity, name, &"alice").unwrap().unwrap();
+        assert_eq!(at_t1.entity_factoms(entity).unwrap().len(), 1);
+        assert!(store.db().entity_factoms(entity).unwrap().is_empty());
+    }
+
+    #[test]
+    fn as_of_preserves_easvt_order_for_prefix_values() {
+        let (_dir, store) = temp_store();
+        let entity = store.new_entity().unwrap();
+        let tags = store
+            .declare_attribute(def("person/tags", Type::String, CollectionKind::Many))
+            .unwrap();
+
+        store.assert(entity, tags, &"a").unwrap().unwrap();
+        let t2 = store.assert(entity, tags, &"a\0").unwrap().unwrap();
+        store.retract(entity, tags, &"a").unwrap().unwrap();
+        store.retract(entity, tags, &"a\0").unwrap().unwrap();
+        store.assert(entity, tags, &"a").unwrap().unwrap();
+        store.assert(entity, tags, &"a\0").unwrap().unwrap();
+
+        let values = store
+            .db()
+            .at(t2)
+            .entity_factoms(entity)
+            .unwrap()
+            .into_iter()
+            .map(|factom| factom.value().clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            vec![Value::String("a".into()), Value::String("a\0".into())]
+        );
+    }
+
+    #[test]
+    fn slot_at_as_of_counts_only_visible_slots() {
+        let (_dir, store) = temp_store();
+        let entity = store.new_entity().unwrap();
+        let items = store
+            .declare_attribute(def("person/items", Type::String, CollectionKind::List))
+            .unwrap();
+
+        let t1 = store.push(entity, items, &"a").unwrap().unwrap();
+        let first = store.db().slot_at(entity, items, 0).unwrap().unwrap();
+        let t2 = store.push(entity, items, &"b").unwrap().unwrap();
+        let second = store.db().slot_at(entity, items, 1).unwrap().unwrap();
+        store
+            .remove(entity, items, second.clone())
+            .unwrap()
+            .unwrap();
+        let db = store.db();
+
+        assert_eq!(db.at(t1).slot_at(entity, items, 0).unwrap(), Some(first));
+        assert_eq!(db.at(t1).slot_at(entity, items, 1).unwrap(), None);
+        assert_eq!(db.at(t2).slot_at(entity, items, 1).unwrap(), Some(second));
+        assert_eq!(db.slot_at(entity, items, 1).unwrap(), None);
+    }
+
+    #[test]
+    fn indexed_value_queries_respect_as_of() {
+        let (_dir, store) = temp_store();
+        let entity = store.new_entity().unwrap();
+        let age = store
+            .declare_attribute(AttributeDef {
+                indexed: true,
+                ..def("person/age", Type::Long, CollectionKind::One)
+            })
+            .unwrap();
+
+        let t1 = store.assert(entity, age, &30i64).unwrap().unwrap();
+        let t2 = store.assert(entity, age, &31i64).unwrap().unwrap();
+        let db = store.db();
+
+        assert_eq!(
+            db.at(t1).entities_with_value(age, &30i64).unwrap(),
+            vec![entity]
+        );
+        assert!(
+            db.at(t1)
+                .entities_with_value(age, &31i64)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.at(t2)
+                .entities_with_value(age, &30i64)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            db.at(t2).entities_with_value(age, &31i64).unwrap(),
+            vec![entity]
+        );
+    }
+
+    #[test]
+    fn reverse_reference_queries_respect_as_of() {
+        let (_dir, store) = temp_store();
+        let source = store.new_entity().unwrap();
+        let first_target = store.new_entity().unwrap();
+        let second_target = store.new_entity().unwrap();
+        let friend = store
+            .declare_attribute(def("person/friend", Type::Ref, CollectionKind::One))
+            .unwrap();
+
+        let t1 = store
+            .assert(source, friend, &first_target)
+            .unwrap()
+            .unwrap();
+        let t2 = store
+            .assert(source, friend, &second_target)
+            .unwrap()
+            .unwrap();
+        let db = store.db();
+
+        assert_eq!(
+            db.at(t1).referring_entities(first_target, friend).unwrap(),
+            vec![source]
+        );
+        assert!(
+            db.at(t1)
+                .referring_entities(second_target, friend)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.at(t2)
+                .referring_entities(first_target, friend)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            db.at(t2).referring_entities(second_target, friend).unwrap(),
+            vec![source]
+        );
     }
 }

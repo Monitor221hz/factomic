@@ -27,5 +27,5 @@ pub use error::{Error, Result};
 pub use factom::{CollectionKind, Factom, MapKey, Op, Slot};
 pub use id::{AttributeId, EntityId, TxnId};
 pub use primitive::{DecodePrimitive, EncodePrimitive, Primitive};
-pub use store::{AttributeDef, Store, Transaction};
+pub use store::{AttributeDef, Db, Store, Transaction};
 pub use value::{Type, Value};
