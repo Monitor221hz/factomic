@@ -1,30 +1,21 @@
+use std::time::SystemTime;
+
 use fjall::Readable;
 use itertools::Itertools;
+use jiff::Timestamp;
 
 use crate::error::{Error, Result};
 use crate::factom::{Factom, Op, Slot};
-use crate::id::{AttributeId, EntityId, TxnId};
-use crate::keys;
+use crate::id::{AttributeId, EntityId, TX_TIMESTAMP_ATTR, TxnId};
 use crate::primitive::EncodePrimitive;
 use crate::store::Db;
 use crate::value::tag_for_type;
+use crate::{Value, keys};
 
 const TXN_LEN: usize = size_of::<TxnId>();
 
-fn decode_txn(bytes: &[u8]) -> Result<TxnId> {
-    if bytes.len() != TXN_LEN {
-        return Err(Error::CorruptKey {
-            expected: TXN_LEN,
-            got: bytes.len(),
-        });
-    }
-    Ok(TxnId::with_value(u64::from_be_bytes(
-        bytes.try_into().unwrap(),
-    )))
-}
-
 fn current_candidate(key: &[u8], payload: &[u8]) -> Result<(Vec<u8>, Op)> {
-    let txn = decode_txn(payload)?;
+    let txn = TxnId::try_from(payload)?;
     let mut temporal_key = keys::encode_history_identity(key); // add 0x00 00
     temporal_key.reserve_exact(TXN_LEN);
     temporal_key.extend_from_slice(&txn.to_be_bytes());
@@ -184,6 +175,33 @@ impl Db {
         Ok(Some(slot))
     }
 
+    pub fn txn_at(&self, time: SystemTime) -> Result<Option<TxnId>> {
+        let expected = Timestamp::try_from(time)?;
+        let region = Value::Timestamp(expected).region();
+
+        let start = keys::avest_attr_prefix(TX_TIMESTAMP_ATTR);
+
+        let mut end = keys::avest_value_prefix(TX_TIMESTAMP_ATTR, &region);
+        end.extend_from_slice(&EntityId::with_value(u64::MAX).to_be_bytes());
+        Slot::Empty.encode_key(&mut end);
+
+        let entries = self.snapshot.range(&self.avest, start..=end);
+
+        for entry in entries.rev() {
+            let (key, _) = entry.into_inner()?;
+            let (_, _, txn_entity, _) = keys::decode_avest_key(&key)?;
+            let txn = TxnId::with_entity(txn_entity);
+
+            if self.as_of.is_some_and(|cutoff| txn > cutoff) {
+                continue;
+            }
+
+            return Ok(Some(txn));
+        }
+
+        Ok(None)
+    }
+
     pub fn entity_factoms(&self, entity: EntityId) -> Result<Vec<Factom>> {
         let prefix = keys::easvt_entity_prefix(entity);
         let mut factoms = Vec::new();
@@ -199,7 +217,7 @@ impl Db {
         for item in self.snapshot.prefix(&self.easvt, prefix) {
             let (key, payload) = item.into_inner()?;
             let (e, a, k, v) = keys::decode_easvt_key(&key)?;
-            let txn = decode_txn(&payload)?;
+            let txn = TxnId::try_from(payload.as_ref())?;
             factoms.push(Factom::new(e, a, k, v, txn, Op::Assert));
         }
         Ok(factoms)
@@ -292,6 +310,8 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use tempfile::TempDir;
 
     use super::*;
@@ -314,6 +334,20 @@ mod tests {
             indexed: false,
             is_component: false,
         }
+    }
+
+    fn tx_time(db: &Db, txn: TxnId) -> SystemTime {
+        let timestamp = db
+            .tx_factoms(txn)
+            .unwrap()
+            .into_iter()
+            .find(|factom| factom.attribute() == TX_TIMESTAMP_ATTR)
+            .map(|factom| match factom.value() {
+                Value::Timestamp(timestamp) => *timestamp,
+                _ => panic!(),
+            })
+            .unwrap();
+        SystemTime::try_from(timestamp).unwrap()
     }
 
     #[test]
@@ -477,6 +511,78 @@ mod tests {
         assert_eq!(
             db.at(t2).referring_entities(second_target, friend).unwrap(),
             vec![source]
+        );
+    }
+
+    #[test]
+    fn txn_at_respects_timestamp_bounds() {
+        let (_dir, store) = temp_store();
+        let entity = store.new_entity().unwrap();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::Many))
+            .unwrap();
+        let t1 = store.assert(entity, name, &"one").unwrap().unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+        let t2 = store.assert(entity, name, &"two").unwrap().unwrap();
+        let db = store.db();
+        let t1_time = tx_time(&db, t1);
+        let t2_time = tx_time(&db, t2);
+        let between = t1_time + (t2_time.duration_since(t1_time).unwrap() / 2);
+
+        assert_eq!(db.txn_at(t1_time - Duration::from_micros(1)).unwrap(), None);
+        assert_eq!(db.txn_at(t1_time).unwrap(), Some(t1));
+        assert_eq!(db.txn_at(between).unwrap(), Some(t1));
+        assert_eq!(db.txn_at(t2_time).unwrap(), Some(t2));
+        assert_eq!(
+            db.txn_at(t2_time + Duration::from_millis(1)).unwrap(),
+            Some(t2)
+        );
+    }
+
+    #[test]
+    fn time_views_respect_cutoffs_and_fallbacks() {
+        let (_dir, store) = temp_store();
+        let entity = store.new_entity().unwrap();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let t1 = store.assert(entity, name, &"one").unwrap().unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+        let t2 = store.assert(entity, name, &"two").unwrap().unwrap();
+        let db = store.db();
+        let t1_time = tx_time(&db, t1);
+        let t2_time = tx_time(&db, t2);
+        let before = t1_time - Duration::from_micros(1);
+        let at_t1 = db.at(t1);
+
+        assert!(db.at_time(before).unwrap().is_none());
+        assert_eq!(at_t1.txn_at(t2_time).unwrap(), Some(t1));
+        assert_eq!(
+            at_t1
+                .at_time(t2_time)
+                .unwrap()
+                .unwrap()
+                .entity_factoms(entity)
+                .unwrap()[0]
+                .value(),
+            &Value::String("one".into())
+        );
+        assert_eq!(
+            db.at_time_else_current(before)
+                .unwrap()
+                .entity_factoms(entity)
+                .unwrap()[0]
+                .value(),
+            &Value::String("two".into())
+        );
+        assert_eq!(
+            at_t1
+                .at_time_else_current(before)
+                .unwrap()
+                .entity_factoms(entity)
+                .unwrap()[0]
+                .value(),
+            &Value::String("one".into())
         );
     }
 }

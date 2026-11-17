@@ -7,20 +7,7 @@ use crate::id::{AttributeId, EntityId, TX_KIND_ATTR, TX_MOVE_ATTR, TX_TIMESTAMP_
 use crate::keys;
 use crate::primitive::{DecodePrimitive, EncodePrimitive};
 use crate::store::{AttributeDef, Store};
-use crate::value::{TAG_REF, Type, Value, tag_for_type};
-
-fn encode_region<V: EncodePrimitive>(value: &V) -> Vec<u8> {
-    let mut region = Vec::with_capacity(9);
-    region.push(tag_for_type(V::TYPE));
-    value.encode(&mut region);
-    region
-}
-
-fn value_region(value: &Value) -> Vec<u8> {
-    let mut region = Vec::with_capacity(9);
-    value.encode_key(&mut region);
-    region
-}
+use crate::value::{TAG_REF, Type, Value, region};
 
 fn check_type(store: &Store, attr: AttributeId, ty: Type) -> Result<AttributeDef> {
     let def = store.attribute_def(attr)?;
@@ -189,7 +176,7 @@ impl Store {
     }
 
     fn record_tx_kind(&self, batch: &mut OwnedWriteBatch, txn: TxnId, kind: &str) {
-        let region = encode_region(&kind);
+        let region = region(&kind);
         let entity = txn.entity_id();
         let payload = txn.to_be_bytes();
         batch.insert(
@@ -221,7 +208,7 @@ impl Store {
         bytes.extend_from_slice(&attr.to_be_bytes());
         from.encode_key(&mut bytes);
         to.encode_key(&mut bytes);
-        let region = encode_region(&bytes.as_slice());
+        let region = region(&bytes.as_slice());
         let entity = txn.entity_id();
         let payload = txn.to_be_bytes();
         batch.insert(
@@ -242,7 +229,7 @@ impl Store {
     }
 
     fn record_tx_timestamp(&self, batch: &mut OwnedWriteBatch, txn: TxnId) {
-        let region = encode_region(&Timestamp::now());
+        let region = region(&Timestamp::now());
         let entity = txn.entity_id();
         let payload = txn.to_be_bytes();
         batch.insert(
@@ -259,6 +246,11 @@ impl Store {
             &self.txlog,
             keys::txlog_key(txn, entity, TX_TIMESTAMP_ATTR, &Slot::Empty, &region),
             [ASSERT],
+        );
+        batch.insert(
+            &self.avest,
+            keys::avest_key(entity, TX_TIMESTAMP_ATTR, &Slot::Empty, &region),
+            payload,
         );
     }
 }

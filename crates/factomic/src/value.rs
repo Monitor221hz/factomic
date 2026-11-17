@@ -114,6 +114,19 @@ impl Value {
             _ => Err(Error::UnknownValueTag(tag)),
         }
     }
+
+    pub fn region(&self) -> Vec<u8> {
+        let mut region = Vec::with_capacity(1 + size_of_val(self));
+        self.encode_key(&mut region);
+        region
+    }
+}
+
+pub(crate) fn region<V: EncodePrimitive>(value: &V) -> Vec<u8> {
+    let mut region = Vec::with_capacity(1 + size_of_val(value));
+    region.push(tag_for_type(V::TYPE));
+    value.encode(&mut region);
+    region
 }
 
 impl TryFrom<&Value> for bool {

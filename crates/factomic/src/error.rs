@@ -65,6 +65,9 @@ pub enum Error {
 
     #[error("utf 8 err")]
     StringError(#[from] std::str::Utf8Error),
+
+    #[error("time conversion error: {0}")]
+    TimeError(#[from] jiff::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

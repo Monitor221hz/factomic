@@ -6,15 +6,18 @@ use std::{
 use fjall::OwnedWriteBatch;
 use fractional_index::FractionalIndex;
 
-use crate::error::{Error, Result};
 use crate::factom::{ASSERT, CollectionKind, MapKey, Op, RETRACT, Slot};
 use crate::id::{AttributeId, EntityId, TxnId};
 use crate::keys;
 use crate::primitive::{DecodePrimitive, EncodePrimitive};
 use crate::store::{AttributeDef, Store};
 use crate::value::{TAG_REF, Type, Value};
+use crate::{
+    error::{Error, Result},
+    value,
+};
 
-use super::{FactomRef, check_key, check_type, encode_region, ref_target, value_region};
+use super::{FactomRef, check_key, check_type, ref_target};
 
 const EA_KEY_OFFSET: usize = size_of::<EntityId>() + size_of::<AttributeId>();
 
@@ -106,7 +109,7 @@ impl<'a> Transaction<'a> {
             attr,
             slot: Slot::Empty,
             ty: V::TYPE,
-            region: encode_region(value),
+            region: value::region(value),
         });
         self
     }
@@ -123,7 +126,7 @@ impl<'a> Transaction<'a> {
             attr,
             slot: Slot::Empty,
             ty: V::TYPE,
-            region: encode_region(value),
+            region: value::region(value),
         });
         self
     }
@@ -141,7 +144,7 @@ impl<'a> Transaction<'a> {
             attr,
             slot,
             ty: V::TYPE,
-            region: encode_region(value),
+            region: value::region(value),
         });
         self
     }
@@ -159,7 +162,7 @@ impl<'a> Transaction<'a> {
             attr,
             slot,
             ty: V::TYPE,
-            region: encode_region(value),
+            region: value::region(value),
         });
         self
     }
@@ -171,7 +174,7 @@ impl<'a> Transaction<'a> {
             attr,
             slot: Slot::Empty,
             ty: value.value_type(),
-            region: value_region(value),
+            region: value.region(),
         });
         self
     }
@@ -183,7 +186,7 @@ impl<'a> Transaction<'a> {
             attr,
             slot: Slot::Empty,
             ty: value.value_type(),
-            region: value_region(value),
+            region: value.region(),
         });
         self
     }
@@ -201,7 +204,7 @@ impl<'a> Transaction<'a> {
             attr,
             slot,
             ty: value.value_type(),
-            region: value_region(value),
+            region: value.region(),
         });
         self
     }
@@ -219,7 +222,7 @@ impl<'a> Transaction<'a> {
             attr,
             slot,
             ty: value.value_type(),
-            region: value_region(value),
+            region: value.region(),
         });
         self
     }
@@ -234,7 +237,7 @@ impl<'a> Transaction<'a> {
             entity,
             attr,
             ty: V::TYPE,
-            region: encode_region(value),
+            region: value::region(value),
             end: ListEnd::Back,
         });
         self
@@ -250,7 +253,7 @@ impl<'a> Transaction<'a> {
             entity,
             attr,
             ty: V::TYPE,
-            region: encode_region(value),
+            region: value::region(value),
             end: ListEnd::Front,
         });
         self
@@ -286,7 +289,7 @@ impl<'a> Transaction<'a> {
             entity,
             attr,
             ty: V::TYPE,
-            region: encode_region(value),
+            region: value::region(value),
             position: InsertPosition::Before(anchor),
         });
         self
@@ -303,7 +306,7 @@ impl<'a> Transaction<'a> {
             entity,
             attr,
             ty: V::TYPE,
-            region: encode_region(value),
+            region: value::region(value),
             position: InsertPosition::After(anchor),
         });
         self
@@ -988,7 +991,7 @@ fn for_each_visible_reference(
     for guard in store.vaest.prefix(keys::vaest_target_prefix(target)) {
         let (key, payload) = guard.into_inner()?;
         let (_, attr, source, slot) = keys::decode_vaest_key(&key)?;
-        let region = value_region(&Value::Ref(target));
+        let region = Value::Ref(target).region();
         if let Some(changes) = changes.get(source, attr)
             && changes.evictions.contains_key(&sv_key(&slot, &region))
         {
@@ -1003,7 +1006,7 @@ fn for_each_visible_reference(
     }
     for key in changes.pending_reference_keys(target) {
         let (_, attr, source, slot) = keys::decode_vaest_key(key)?;
-        let region = value_region(&Value::Ref(target));
+        let region = Value::Ref(target).region();
         visit(VisibleReference {
             source,
             attr,

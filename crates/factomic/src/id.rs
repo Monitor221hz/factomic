@@ -1,3 +1,5 @@
+use crate::Error;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EntityId(u64);
 
@@ -73,6 +75,10 @@ impl TxnId {
         TxnId(id)
     }
 
+    pub fn with_entity(entity: EntityId) -> Self {
+        TxnId(entity.as_u64())
+    }
+
     pub fn as_u64(&self) -> u64 {
         self.0
     }
@@ -89,6 +95,22 @@ impl TxnId {
         Self::with_value(u64::from_be_bytes(
             bytes[..size_of::<TxnId>()].try_into().unwrap(),
         ))
+    }
+}
+
+impl TryFrom<&[u8]> for TxnId {
+    type Error = Error;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        if value.len() != size_of::<Self>() {
+            return Err(Error::CorruptKey {
+                expected: size_of::<Self>(),
+                got: value.len(),
+            });
+        }
+        Ok(TxnId::with_value(u64::from_be_bytes(
+            value.try_into().unwrap(),
+        )))
     }
 }
 

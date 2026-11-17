@@ -1,5 +1,7 @@
+use std::alloc::System;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use arc_swap::ArcSwap;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, Readable};
@@ -70,7 +72,7 @@ impl Db {
 
     /// Returns an up-to-date snapshot as it existed after the most recent transaction.
     /// This returns an identical clone if the original self was already the latest snapshot.
-    pub fn current(self: &Arc<Self>) -> Arc<Self> {
+    pub fn newest(self: &Arc<Self>) -> Arc<Self> {
         Arc::new(Self {
             txn: self.txn,
             as_of: None,
@@ -86,6 +88,22 @@ impl Db {
             vaest_h: self.vaest_h.clone(),
             txlog: self.txlog.clone(),
         })
+    }
+
+    pub fn at_time(self: &Arc<Self>, time: SystemTime) -> Result<Option<Arc<Self>>> {
+        if let Some(cutoff) = self.txn_at(time)? {
+            Ok(Some(self.at(cutoff)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn at_time_else_current(self: &Arc<Self>, time: SystemTime) -> Result<Arc<Self>> {
+        if let Some(cutoff) = self.txn_at(time)? {
+            Ok(self.at(cutoff))
+        } else {
+            Ok(self.clone())
+        }
     }
 
     pub fn attribute_def(&self, id: AttributeId) -> Result<AttributeDef> {
@@ -188,6 +206,10 @@ impl Store {
         self.current.load().at(txn)
     }
 
+    pub fn db_at_time(&self, time: SystemTime) -> Result<Option<Arc<Db>>> {
+        self.current.load().at_time(time)
+    }
+
     pub(crate) fn swap(&self, txn: TxnId) {
         self.current.store(
             Db {
@@ -268,7 +290,7 @@ impl Store {
                 value_type: Type::Timestamp,
                 kind: CollectionKind::One,
                 key_type: None,
-                indexed: false,
+                indexed: true,
                 is_component: false,
             },
             AttributeDef {
