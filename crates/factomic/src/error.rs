@@ -68,6 +68,9 @@ pub enum Error {
 
     #[error("time conversion error: {0}")]
     TimeError(#[from] jiff::Error),
+
+    #[error("slice error {0}")]
+    SliceError(#[from] std::array::TryFromSliceError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

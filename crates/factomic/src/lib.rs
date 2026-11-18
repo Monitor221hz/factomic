@@ -14,7 +14,6 @@
 //! (Entity) to a (V)alue via an (A)ttribute at (S)lot in (T)xn (which points to an entity that contains point in time *t* in its attribute tx/Timestamp)
 
 #![forbid(unsafe_code)]
-
 mod error;
 mod factom;
 mod id;

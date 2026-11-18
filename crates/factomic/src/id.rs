@@ -64,6 +64,20 @@ impl AttributeId {
     }
 }
 
+impl TryFrom<&[u8]> for AttributeId {
+    type Error = Error;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        if value.len() != size_of::<Self>() {
+            return Err(Error::CorruptKey {
+                expected: size_of::<Self>(),
+                got: value.len(),
+            });
+        }
+        Ok(Self::new(u16::from_be_bytes(value.try_into()?)))
+    }
+}
+
 impl TxnId {
     pub fn new(partition: u8, index: u64) -> Self {
         assert!(index < (1 << 56));

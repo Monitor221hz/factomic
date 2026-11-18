@@ -141,6 +141,25 @@ impl Db {
             is_component,
         })
     }
+
+    pub fn named_attribute_def(&self, name: &str) -> Result<Option<AttributeDef>> {
+        let by_name_key = by_name_key(name);
+        if let Some(id_bytes) = self.attrs.get(&by_name_key)? {
+            let id = AttributeId::try_from(id_bytes.as_ref())?;
+            Ok(Some(self.attribute_def(id)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn attribute_id(&self, name: &str) -> Result<Option<AttributeId>> {
+        let by_name_key = by_name_key(name);
+        if let Some(id_bytes) = self.attrs.get(&by_name_key)? {
+            Ok(Some(AttributeId::try_from(id_bytes.as_ref())?))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 pub struct Store {
