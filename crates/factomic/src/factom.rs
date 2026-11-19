@@ -1,3 +1,5 @@
+use fractional_index::FractionalIndex;
+
 use crate::error::{Error, Result};
 use crate::id::{AttributeId, EntityId, TxnId};
 use crate::primitive::{DecodePrimitive, EncodePrimitive};
@@ -43,6 +45,7 @@ pub enum MapKey {
     String(String),
     Long(i64),
     Ref(EntityId),
+    // todo: bytes, timestamps, composites (low prio)
 }
 
 impl MapKey {
@@ -52,6 +55,62 @@ impl MapKey {
             MapKey::Long(_) => Type::Long,
             MapKey::Ref(_) => Type::Ref,
         }
+    }
+}
+
+impl TryFrom<&MapKey> for String {
+    type Error = Error;
+
+    fn try_from(value: &MapKey) -> Result<Self> {
+        match value {
+            MapKey::String(s) => Ok(s.clone()),
+            _ => Err(Error::MapKeyTypeMismatch),
+        }
+    }
+}
+
+impl TryFrom<&MapKey> for EntityId {
+    type Error = Error;
+
+    fn try_from(value: &MapKey) -> Result<Self> {
+        match value {
+            MapKey::Ref(e) => Ok(e.to_owned()),
+            _ => Err(Error::MapKeyTypeMismatch),
+        }
+    }
+}
+
+impl TryFrom<&MapKey> for i64 {
+    type Error = Error;
+    fn try_from(value: &MapKey) -> Result<Self> {
+        match value {
+            MapKey::Long(i) => Ok(i.to_owned()),
+            _ => Err(Error::MapKeyTypeMismatch),
+        }
+    }
+}
+
+impl From<String> for MapKey {
+    fn from(value: String) -> Self {
+        MapKey::String(value)
+    }
+}
+
+impl From<&str> for MapKey {
+    fn from(value: &str) -> Self {
+        MapKey::String(value.into())
+    }
+}
+
+impl From<i64> for MapKey {
+    fn from(value: i64) -> Self {
+        MapKey::Long(value)
+    }
+}
+
+impl From<EntityId> for MapKey {
+    fn from(value: EntityId) -> Self {
+        MapKey::Ref(value)
     }
 }
 
@@ -73,6 +132,10 @@ impl Slot {
             return Err(Error::PositionTooLong(bytes.len()));
         }
         Ok(Slot::Position(bytes))
+    }
+
+    pub(crate) fn with_index(index: &FractionalIndex) -> Result<Self> {
+        Self::position(index.as_bytes().to_vec())
     }
 
     pub(crate) fn encoded_len(&self) -> usize {

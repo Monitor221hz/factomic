@@ -274,8 +274,8 @@ impl<'a> Transaction<'a> {
         self.assert_at(entity, attr, Slot::Key(key), value)
     }
 
-    pub fn remove_key(self, entity: EntityId, attr: AttributeId, key: MapKey) -> Self {
-        self.remove(entity, attr, Slot::Key(key))
+    pub fn remove_key(self, entity: EntityId, attr: AttributeId, key: impl Into<MapKey>) -> Self {
+        self.remove(entity, attr, Slot::Key(key.into()))
     }
 
     pub fn insert_before<V: EncodePrimitive>(
@@ -967,7 +967,7 @@ fn plan_rebalance(
     for factom in visible {
         let region = factom.region.clone();
         changes.evict(entity, attr, factom)?;
-        rebalanced.push((Slot::position(index.as_bytes().to_vec())?, region));
+        rebalanced.push((Slot::with_index(&index)?, region));
         index = FractionalIndex::new_after(&index);
     }
     for (slot, region) in rebalanced {
@@ -1133,7 +1133,7 @@ fn mint_between(left: Option<&Slot>, right: Option<&Slot>) -> Result<Slot> {
         (Some(l), Some(r)) => FractionalIndex::new(Some(&to_index(l)?), Some(&to_index(r)?))
             .ok_or(Error::CorruptPosition)?,
     };
-    Slot::position(index.as_bytes().to_vec())
+    Slot::with_index(&index)
 }
 
 #[cfg(test)]
@@ -1620,10 +1620,7 @@ mod tests {
         );
         let mut index = FractionalIndex::default();
         for factom in &factoms {
-            assert_eq!(
-                factom.slot(),
-                &Slot::position(index.as_bytes().to_vec()).unwrap()
-            );
+            assert_eq!(factom.slot(), &Slot::with_index(&index).unwrap());
             index = FractionalIndex::new_after(&index);
         }
         assert_ne!(factoms[1].slot(), &fractional);
@@ -1818,7 +1815,7 @@ mod tests {
         let (_dir, store) = temp_store();
         let items = declare_list(&store);
         let e = store.new_entity().unwrap();
-        let k = Slot::position(FractionalIndex::default().as_bytes().to_vec()).unwrap();
+        let k = Slot::with_index(&FractionalIndex::default()).unwrap();
         store
             .transact()
             .assert_at(e, items, k.clone(), &"a")
@@ -1872,10 +1869,7 @@ mod tests {
         );
         let mut index = FractionalIndex::default();
         for factom in &factoms {
-            assert_eq!(
-                factom.slot(),
-                &Slot::position(index.as_bytes().to_vec()).unwrap()
-            );
+            assert_eq!(factom.slot(), &Slot::with_index(&index).unwrap());
             index = FractionalIndex::new_after(&index);
         }
     }
@@ -1887,8 +1881,8 @@ mod tests {
         let e = store.new_entity().unwrap();
         let index = FractionalIndex::default();
         let before = FractionalIndex::new_before(&index);
-        let first = Slot::position(before.as_bytes().to_vec()).unwrap();
-        let second = Slot::position(index.as_bytes().to_vec()).unwrap();
+        let first = Slot::with_index(&before).unwrap();
+        let second = Slot::with_index(&index).unwrap();
 
         store
             .transact()

@@ -8,7 +8,6 @@ use crate::error::{Error, Result};
 use crate::factom::{Factom, Op, Slot};
 use crate::id::{AttributeId, EntityId, TX_TIMESTAMP_ATTR, TxnId};
 use crate::primitive::EncodePrimitive;
-use crate::schema::{DbHandle, Entity};
 use crate::store::Db;
 use crate::value::tag_for_type;
 use crate::{Value, keys};

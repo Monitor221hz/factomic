@@ -346,10 +346,12 @@ impl Store {
         &self,
         entity: EntityId,
         attr: AttributeId,
-        key: MapKey,
+        key: impl Into<MapKey>,
         value: &V,
     ) -> Result<Option<TxnId>> {
-        self.transact().put(entity, attr, key, value).commit()
+        self.transact()
+            .put(entity, attr, key.into(), value)
+            .commit()
     }
 
     pub fn remove_key(

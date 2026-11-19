@@ -1,4 +1,4 @@
-use crate::value::Type;
+use crate::{MapKey, value::Type};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -20,6 +20,9 @@ pub enum Error {
 
     #[error("value type mismatch: expected {expected:?}, got {got:?}")]
     ValueTypeMismatch { expected: Type, got: Type },
+
+    #[error("map key type mismatch")]
+    MapKeyTypeMismatch,
 
     #[error("corrupt value for type {0:?}")]
     CorruptPrimitive(Type),
