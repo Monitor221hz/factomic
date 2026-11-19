@@ -97,7 +97,7 @@ mod tests {
         fn ancestor_def() -> AttributeDef {
             AttributeDef {
                 name: "person/ancestor".into(),
-                value_type: Type::String,
+                value_type: Type::Ref,
                 kind: CollectionKind::One,
                 key_type: None,
                 indexed: false,

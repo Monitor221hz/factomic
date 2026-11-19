@@ -226,24 +226,21 @@ impl Db {
         }
     }
 
-    fn prefix_entity_factoms(&self, prefix: &[u8]) -> Result<Vec<Factom>> {
-        let mut factoms = Vec::new();
+    fn prefix_entity_factoms(&self, prefix: &[u8]) -> impl Iterator<Item = Result<Factom>> + '_ {
         if let Some(cutoff) = self.as_of {
-            for item in self.visible_easvt(prefix, cutoff) {
+            self.visible_easvt(prefix, cutoff).map(|item| {
                 let (key, asserted_at) = item?;
                 let (e, a, k, v, _) = keys::decode_easvt_history_key(&key)?;
-                factoms.push(Factom::new(e, a, k, v, asserted_at, Op::Assert));
-            }
-            return Ok(factoms);
+                Ok(Factom::new(e, a, k, v, asserted_at, Op::Assert))
+            })
+        } else {
+            self.snapshot.prefix(&self.easvt, prefix).map(|item| {
+                let (key, payload) = item.into_inner()?;
+                let (e, a, k, v) = keys::decode_easvt_key(&key)?;
+                let txn = TxnId::try_from(payload.as_ref())?;
+                Ok(Factom::new(e, a, k, v, txn, Op::Assert))
+            })
         }
-
-        for item in self.snapshot.prefix(&self.easvt, prefix) {
-            let (key, payload) = item.into_inner()?;
-            let (e, a, k, v) = keys::decode_easvt_key(&key)?;
-            let txn = TxnId::try_from(payload.as_ref())?;
-            factoms.push(Factom::new(e, a, k, v, txn, Op::Assert));
-        }
-        Ok(factoms)
     }
 
     pub fn entity_factoms(&self, entity: EntityId) -> Result<Vec<Factom>> {
