@@ -382,11 +382,21 @@ impl Factom {
         self.op
     }
 
-    pub fn try_value<'a, T>(&'a self) -> Result<T>
+    pub fn try_from_value<'a, T>(&'a self) -> Result<T>
     where
         T: TryFrom<&'a Value, Error = crate::Error>,
     {
         T::try_from(self.value())
+    }
+
+    pub fn try_key_from_slot<'a, T>(&'a self) -> Result<T>
+    where
+        T: TryFrom<&'a MapKey, Error = crate::Error>,
+    {
+        match self.slot() {
+            Slot::Key(map_key) => map_key.try_into(),
+            _ => Err(Error::CorruptPosition),
+        }
     }
 }
 

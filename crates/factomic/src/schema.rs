@@ -38,7 +38,7 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::HashMap, sync::Arc};
 
     use crate::{
         AttributeDef, AttributeId, CollectionKind, EntityId, Result, Store, Type,
@@ -51,6 +51,7 @@ mod tests {
         bucket_list: Vec<String>,
         ancestor: Arc<Person>,
         children: Vec<Person>,
+        friends: HashMap<String, Person>,
     }
 
     struct PersonSchema {
@@ -59,6 +60,7 @@ mod tests {
         bucket_list: AttributeId,
         ancestor: AttributeId,
         children: AttributeId,
+        friends: AttributeId,
     }
 
     impl PersonSchema {
@@ -112,6 +114,16 @@ mod tests {
                 is_component: false,
             }
         }
+        fn friends_def() -> AttributeDef {
+            AttributeDef {
+                name: "person/friends".into(),
+                value_type: Type::Ref,
+                kind: CollectionKind::Map,
+                key_type: Some(Type::String),
+                indexed: false,
+                is_component: false,
+            }
+        }
     }
 
     impl Entity for Person {
@@ -126,6 +138,7 @@ mod tests {
                 bucket_list: store.declare_attribute(PersonSchema::bucket_list_def())?,
                 ancestor: store.declare_attribute(PersonSchema::ancestor_def())?,
                 children: store.declare_attribute(PersonSchema::children_def())?,
+                friends: store.declare_attribute(PersonSchema::friends_def())?,
             })
         }
 
@@ -146,12 +159,16 @@ mod tests {
             let Some(children) = db.attribute_id("person/children")? else {
                 return Ok(None);
             };
+            let Some(friends) = db.attribute_id("person/friends")? else {
+                return Ok(None);
+            };
             Ok(Some(Self {
                 name,
                 age,
                 bucket_list,
                 ancestor,
                 children,
+                friends,
             }))
         }
     }
@@ -162,6 +179,7 @@ mod tests {
         fn bucket_list(&self) -> Result<Vec<String>>;
         fn ancestor(&self) -> Result<Option<DbHandle<Person>>>;
         fn children(&self) -> Result<Vec<DbHandle<Person>>>;
+        fn friends(&self) -> Result<HashMap<String, DbHandle<Person>>>;
     }
 
     impl PersonEntity for DbHandle<Person> {
@@ -190,9 +208,23 @@ mod tests {
 
         fn children(&self) -> Result<Vec<DbHandle<Person>>> {
             self.db
-                .entity_values::<EntityId>(self.entity, self.schema.ancestor)?
+                .entity_values::<EntityId>(self.entity, self.schema.children)?
                 .into_iter()
                 .filter_map(|e| self.db.entity(e).transpose())
+                .collect()
+        }
+
+        fn friends(&self) -> Result<HashMap<String, DbHandle<Person>>> {
+            self.db
+                .entity_keyvalues::<String, EntityId>(self.entity, self.schema.friends)?
+                .into_iter()
+                .filter_map(|p| {
+                    let Some(entity) = self.db.entity(p.1).transpose() else {
+                        return None;
+                    };
+                    Some((p.0, entity))
+                })
+                .map(|(name, friend)| Ok((name, friend?)))
                 .collect()
         }
     }

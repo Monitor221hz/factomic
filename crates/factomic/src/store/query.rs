@@ -10,7 +10,7 @@ use crate::id::{AttributeId, EntityId, TX_TIMESTAMP_ATTR, TxnId};
 use crate::primitive::EncodePrimitive;
 use crate::store::Db;
 use crate::value::tag_for_type;
-use crate::{Value, keys};
+use crate::{MapKey, Value, keys};
 
 const TXN_LEN: usize = size_of::<TxnId>();
 
@@ -259,7 +259,7 @@ impl Db {
         T: for<'a> TryFrom<&'a Value, Error = crate::Error>,
     {
         self.prefix_entity_factom(&keys::easvt_entity_attr_prefix(entity, attr))?
-            .map(|f| f.try_value())
+            .map(|f| f.try_from_value())
             .transpose()
     }
 
@@ -269,7 +269,18 @@ impl Db {
     {
         self.prefix_entity_factoms(&keys::easvt_entity_attr_prefix(entity, attr))?
             .into_iter()
-            .map(|f| f.try_value::<T>())
+            .map(|f| f.try_from_value::<T>())
+            .collect()
+    }
+
+    pub fn entity_keyvalues<K, V>(&self, entity: EntityId, attr: AttributeId) -> Result<Vec<(K, V)>>
+    where
+        K: for<'a> TryFrom<&'a MapKey, Error = crate::Error>,
+        V: for<'a> TryFrom<&'a Value, Error = crate::Error>,
+    {
+        self.prefix_entity_factoms(&keys::easvt_entity_attr_prefix(entity, attr))?
+            .into_iter()
+            .map(|f| Ok((f.try_key_from_slot::<K>()?, f.try_from_value::<V>()?)))
             .collect()
     }
 
