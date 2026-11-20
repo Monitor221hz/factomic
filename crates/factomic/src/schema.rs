@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::Weak;
+use std::time::SystemTime;
 
 use arc_swap::ArcSwap;
 
@@ -19,10 +20,33 @@ pub trait Schema: Sized {
     fn get(db: &Arc<Db>) -> Result<Option<Self>>;
 }
 
+#[derive(Clone)]
 pub struct DbHandle<T: Entity> {
     pub db: Arc<Db>,
     pub schema: Arc<T::Schema>,
     pub entity: EntityId,
+}
+
+impl<T: Entity> DbHandle<T> {
+    pub fn read_at(&self, txn: TxnId) -> Result<Option<DbHandle<T>>> {
+        let db = self.db.at(txn);
+        db.entity(self.entity)
+    }
+
+    pub fn read_at_time(&self, time: SystemTime) -> Result<Option<DbHandle<T>>> {
+        let Some(db) = self.db.at_time(time)? else {
+            return Ok(None);
+        };
+        db.entity(self.entity)
+    }
+
+    pub fn weak_from_pointee(&self, model: T) -> DbWeakHandle<T> {
+        DbWeakHandle {
+            entity: self.entity,
+            db: self.db.clone(),
+            model: ArcSwap::from_pointee(model),
+        }
+    }
 }
 
 impl<T: Entity> From<DbHandle<T>> for EntityId {
@@ -65,9 +89,9 @@ impl Db {
             entity,
         }))
     }
-    // todo: entity, entity_at, entity_at_time
 }
 
+#[derive(Clone)]
 pub struct DbHandleMut<T: Entity> {
     pub db: Arc<Store>,
     pub schema: Arc<T::Schema>,
@@ -106,7 +130,18 @@ impl<T: Entity> DbHandleMut<T> {
             entity: self.entity,
         }
     }
-    // todo: read, read_at, read_at_time?
+
+    pub fn read_at(&self, txn: TxnId) -> Result<Option<DbHandle<T>>> {
+        let db = self.db.db_at(txn);
+        db.entity(self.entity)
+    }
+
+    pub fn read_at_time(&self, time: SystemTime) -> Result<Option<DbHandle<T>>> {
+        let Some(db) = self.db.db_at_time(time)? else {
+            return Ok(None);
+        };
+        db.entity(self.entity)
+    }
 }
 
 impl Store {
@@ -132,7 +167,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::{
-        AttributeDef, AttributeId, CollectionKind, EntityId, Result, Store, Type,
+        AttributeDef, AttributeId, CollectionKind, EntityId, Error, Result, Store, Type,
         schema::{DbHandle, Entity, EntityTransaction, Schema},
     };
 
@@ -143,12 +178,12 @@ mod tests {
     }
 
     pub struct Person {
-        name: String,
-        age: i64,
-        bucket_list: Vec<String>,
-        ancestor: Arc<Person>,
-        children: Vec<Person>,
-        friends: HashMap<String, Person>,
+        pub name: String,
+        pub age: i64,
+        pub bucket_list: Vec<String>,
+        pub ancestor: Arc<Person>,
+        pub children: Vec<Person>,
+        pub friends: HashMap<String, Person>,
     }
 
     pub struct PersonSchema {
@@ -279,6 +314,7 @@ mod tests {
         fn children_at(&self, ordinal: usize) -> Result<Option<DbHandle<Person>>>;
         fn friends(&self) -> impl Iterator<Item = Result<(String, DbHandle<Person>)>> + '_;
         fn friends_seek(&self, key: &str) -> Result<Option<DbHandle<Person>>>;
+        // fn model(&self) -> Result<Option<Person>>;
     }
 
     impl PersonEntity for DbHandle<Person> {
@@ -338,17 +374,37 @@ mod tests {
             self.db
                 .entity_keyvalues::<String, EntityId>(self.entity, self.schema.friends)
                 .into_iter()
-                .filter_map(|r| match r {
+                .map(|r| match r {
                     Ok(p) => {
-                        let Some(entity) = self.db.entity(p.1).transpose() else {
-                            return None;
-                        };
-                        Some((p.0, entity))
+                        let entity = self.db.entity(p.1)?.unwrap(); // if Ok(p) entity must exist
+                        Ok((p.0, entity))
                     }
-                    Err(_) => None,
+                    Err(e) => Err(e),
                 })
-                .map(|(name, friend)| Ok((name, friend?)))
         }
+
+        // fn model(&self) -> Result<Option<Person>> {
+        //     let Some(name) = self.name()? else {
+        //         return Ok(None);
+        //     };
+        //     let Some(age) = self.age()? else {
+        //         return Ok(None);
+        //     };
+        //     let bucket_list = self.bucket_list().collect::<Result<Vec<_>>>()?;
+        //     let Some(ancestor) = self.ancestor()? else {
+        //         return Ok(None);
+        //     };
+        //     let children = self.children().collect::<Result<Vec<_>>>()?; //all types that impl FromIterator
+        //     let friends = self.friends().collect::<Result<HashMap<_, _>>>()?;
+        //     Ok(Some(Person {
+        //         name,
+        //         age,
+        //         bucket_list,
+        //         ancestor,
+        //         children: todo!(),
+        //         friends: todo!(),
+        //     }))
+        // }
     }
 
     pub trait PersonEntityMut: Sized {

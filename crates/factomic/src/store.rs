@@ -33,6 +33,7 @@ pub struct AttributeDef {
 const META_NEXT_ATTR: &[u8; 9] = b"next_attr";
 const META_ENTITY_PREFIX: u8 = 0x02;
 
+#[derive(Clone)]
 pub struct Db {
     txn: TxnId,
     as_of: Option<TxnId>,
