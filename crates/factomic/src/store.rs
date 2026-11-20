@@ -529,6 +529,13 @@ mod tests {
     fn fresh_entity_has_no_factoms() {
         let (_dir, store) = temp_store();
         let entity = store.new_entity().unwrap();
-        assert!(store.db().entity_factoms(entity).unwrap().is_empty());
+        assert!(
+            store
+                .db()
+                .entity_factoms(entity)
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .is_empty()
+        );
     }
 }

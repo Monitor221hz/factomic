@@ -143,6 +143,12 @@ impl TryFrom<&Value> for bool {
     }
 }
 
+impl From<bool> for Value {
+    fn from(value: bool) -> Self {
+        Value::Bool(value)
+    }
+}
+
 impl TryFrom<&Value> for i64 {
     type Error = Error;
 
@@ -154,6 +160,12 @@ impl TryFrom<&Value> for i64 {
                 got: other.value_type(),
             }),
         }
+    }
+}
+
+impl From<i64> for Value {
+    fn from(value: i64) -> Self {
+        Value::Long(value)
     }
 }
 
@@ -171,6 +183,12 @@ impl TryFrom<&Value> for f64 {
     }
 }
 
+impl From<f64> for Value {
+    fn from(value: f64) -> Self {
+        Value::Double(value)
+    }
+}
+
 impl TryFrom<&Value> for String {
     type Error = Error;
 
@@ -182,6 +200,12 @@ impl TryFrom<&Value> for String {
                 got: other.value_type(),
             }),
         }
+    }
+}
+
+impl From<String> for Value {
+    fn from(value: String) -> Self {
+        Value::String(value)
     }
 }
 
@@ -199,6 +223,12 @@ impl TryFrom<&Value> for Vec<u8> {
     }
 }
 
+impl From<Vec<u8>> for Value {
+    fn from(value: Vec<u8>) -> Self {
+        Value::Bytes(value)
+    }
+}
+
 impl TryFrom<&Value> for EntityId {
     type Error = Error;
 
@@ -210,6 +240,12 @@ impl TryFrom<&Value> for EntityId {
                 got: other.value_type(),
             }),
         }
+    }
+}
+
+impl From<EntityId> for Value {
+    fn from(value: EntityId) -> Self {
+        Value::Ref(value)
     }
 }
 
@@ -227,6 +263,12 @@ impl TryFrom<&Value> for Timestamp {
     }
 }
 
+impl From<Timestamp> for Value {
+    fn from(value: Timestamp) -> Self {
+        Value::Timestamp(value)
+    }
+}
+
 impl<'a> TryFrom<&'a Value> for &'a str {
     type Error = Error;
 
@@ -241,6 +283,12 @@ impl<'a> TryFrom<&'a Value> for &'a str {
     }
 }
 
+impl From<&str> for Value {
+    fn from(value: &str) -> Self {
+        Value::String(value.to_string())
+    }
+}
+
 impl<'a> TryFrom<&'a Value> for &'a [u8] {
     type Error = Error;
 
@@ -252,6 +300,12 @@ impl<'a> TryFrom<&'a Value> for &'a [u8] {
                 got: other.value_type(),
             }),
         }
+    }
+}
+
+impl From<&[u8]> for Value {
+    fn from(value: &[u8]) -> Self {
+        Value::Bytes(value.to_owned())
     }
 }
 

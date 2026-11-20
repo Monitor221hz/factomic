@@ -1,7 +1,7 @@
 use std::time::SystemTime;
 
 use fjall::Readable;
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use jiff::Timestamp;
 
 use crate::error::{Error, Result};
@@ -87,7 +87,7 @@ where
 impl Db {
     fn visible_easvt(
         &self,
-        prefix: &[u8],
+        prefix: Vec<u8>,
         cutoff: TxnId,
     ) -> impl Iterator<Item = Result<(Vec<u8>, TxnId)>> {
         let current = self
@@ -159,7 +159,7 @@ impl Db {
     ) -> Result<Option<Slot>> {
         let prefix = keys::easvt_entity_attr_prefix(entity, attr);
         if let Some(cutoff) = self.as_of {
-            let Some(item) = self.visible_easvt(&prefix, cutoff).nth(ordinal) else {
+            let Some(item) = self.visible_easvt(prefix.clone(), cutoff).nth(ordinal) else {
                 return Ok(None);
             };
             let (key, _) = item?;
@@ -204,7 +204,7 @@ impl Db {
 
     fn prefix_entity_factom(&self, prefix: &[u8]) -> Result<Option<Factom>> {
         if let Some(cutoff) = self.as_of {
-            self.visible_easvt(prefix, cutoff)
+            self.visible_easvt(prefix.to_vec(), cutoff)
                 .next()
                 .map(|item| {
                     let (key, asserted_at) = item?;
@@ -226,29 +226,33 @@ impl Db {
         }
     }
 
-    fn prefix_entity_factoms(&self, prefix: &[u8]) -> impl Iterator<Item = Result<Factom>> + '_ {
+    fn prefix_entity_factoms(&self, prefix: Vec<u8>) -> impl Iterator<Item = Result<Factom>> + '_ {
         if let Some(cutoff) = self.as_of {
-            self.visible_easvt(prefix, cutoff).map(|item| {
+            Either::Left(self.visible_easvt(prefix, cutoff).map(|item| {
                 let (key, asserted_at) = item?;
                 let (e, a, k, v, _) = keys::decode_easvt_history_key(&key)?;
                 Ok(Factom::new(e, a, k, v, asserted_at, Op::Assert))
-            })
+            }))
         } else {
-            self.snapshot.prefix(&self.easvt, prefix).map(|item| {
+            Either::Right(self.snapshot.prefix(&self.easvt, prefix).map(|item| {
                 let (key, payload) = item.into_inner()?;
                 let (e, a, k, v) = keys::decode_easvt_key(&key)?;
                 let txn = TxnId::try_from(payload.as_ref())?;
                 Ok(Factom::new(e, a, k, v, txn, Op::Assert))
-            })
+            }))
         }
     }
 
-    pub fn entity_factoms(&self, entity: EntityId) -> Result<Vec<Factom>> {
-        self.prefix_entity_factoms(&keys::easvt_entity_prefix(entity))
+    pub fn entity_factoms(&self, entity: EntityId) -> impl Iterator<Item = Result<Factom>> + '_ {
+        self.prefix_entity_factoms(keys::easvt_entity_prefix(entity))
     }
 
-    pub fn entity_attr_factoms(&self, entity: EntityId, attr: AttributeId) -> Result<Vec<Factom>> {
-        self.prefix_entity_factoms(&keys::easvt_entity_attr_prefix(entity, attr))
+    pub fn entity_attr_factoms(
+        &self,
+        entity: EntityId,
+        attr: AttributeId,
+    ) -> impl Iterator<Item = Result<Factom>> + '_ {
+        self.prefix_entity_factoms(keys::easvt_entity_attr_prefix(entity, attr))
     }
 
     pub fn entity_value<T>(&self, entity: EntityId, attr: AttributeId) -> Result<Option<T>>
@@ -260,39 +264,79 @@ impl Db {
             .transpose()
     }
 
-    pub fn entity_values<T>(&self, entity: EntityId, attr: AttributeId) -> Result<Vec<T>>
+    pub fn entity_values<T>(
+        &self,
+        entity: EntityId,
+        attr: AttributeId,
+    ) -> impl Iterator<Item = Result<T>> + '_
     where
         T: for<'a> TryFrom<&'a Value, Error = crate::Error>,
     {
-        self.prefix_entity_factoms(&keys::easvt_entity_attr_prefix(entity, attr))?
-            .into_iter()
-            .map(|f| f.try_from_value::<T>())
-            .collect()
+        self.prefix_entity_factoms(keys::easvt_entity_attr_prefix(entity, attr))
+            .map(|f| f.and_then(|f| f.try_from_value::<T>()))
     }
 
-    pub fn entity_keyvalues<K, V>(&self, entity: EntityId, attr: AttributeId) -> Result<Vec<(K, V)>>
+    pub fn entity_value_at<T>(
+        &self,
+        entity: EntityId,
+        attr: AttributeId,
+        ordinal: usize,
+    ) -> Result<Option<T>>
+    where
+        T: for<'a> TryFrom<&'a Value, Error = crate::Error>,
+    {
+        let Some(slot) = self.slot_at(entity, attr, ordinal)? else {
+            return Ok(None);
+        };
+        self.prefix_entity_factom(&keys::easvt_entity_attr_slot_prefix(entity, attr, &slot))?
+            .map(|f| f.try_from_value())
+            .transpose()
+    }
+
+    pub fn entity_keyvalues<K, V>(
+        &self,
+        entity: EntityId,
+        attr: AttributeId,
+    ) -> impl Iterator<Item = Result<(K, V)>> + '_
     where
         K: for<'a> TryFrom<&'a MapKey, Error = crate::Error>,
         V: for<'a> TryFrom<&'a Value, Error = crate::Error>,
     {
-        self.prefix_entity_factoms(&keys::easvt_entity_attr_prefix(entity, attr))?
-            .into_iter()
-            .map(|f| Ok((f.try_key_from_slot::<K>()?, f.try_from_value::<V>()?)))
-            .collect()
+        self.prefix_entity_factoms(keys::easvt_entity_attr_prefix(entity, attr))
+            .map(|f| {
+                let f = f?;
+                Ok((f.try_key_from_slot::<K>()?, f.try_from_value::<V>()?))
+            })
     }
 
-    pub fn entity_history(&self, entity: EntityId) -> Result<Vec<Factom>> {
-        let mut factoms = Vec::new();
-        for item in self.snapshot.prefix(
-            &self.easvt_h,
-            keys::escape_identity(&keys::easvt_entity_prefix(entity)),
-        ) {
-            let (key, payload) = item.into_inner()?;
-            let (e, a, k, v, txn) = keys::decode_easvt_history_key(&key)?;
-            let op = Op::try_from(payload[0])?;
-            factoms.push(Factom::new(e, a, k, v, txn, op));
-        }
-        Ok(factoms)
+    pub fn entity_keyvalue<V>(
+        &self,
+        entity: EntityId,
+        attr: AttributeId,
+        key: impl Into<MapKey>,
+    ) -> Result<Option<V>>
+    where
+        V: for<'a> TryFrom<&'a Value, Error = crate::Error>,
+    {
+        let slot = Slot::Key(key.into());
+
+        self.prefix_entity_factom(&keys::easvt_entity_attr_slot_prefix(entity, attr, &slot))?
+            .map(|factom| factom.try_from_value())
+            .transpose()
+    }
+
+    pub fn entity_history(&self, entity: EntityId) -> impl Iterator<Item = Result<Factom>> + '_ {
+        self.snapshot
+            .prefix(
+                &self.easvt_h,
+                keys::escape_identity(&keys::easvt_entity_prefix(entity)),
+            )
+            .map(|item| {
+                let (key, payload) = item.into_inner()?;
+                let (e, a, k, v, txn) = keys::decode_easvt_history_key(&key)?;
+                let op = Op::try_from(payload[0])?;
+                Ok(Factom::new(e, a, k, v, txn, op))
+            })
     }
 
     pub fn entities_with_value<V: EncodePrimitive>(
@@ -423,21 +467,54 @@ mod tests {
         let at_t1 = db.at(t1);
 
         let before_t1 = db.at(TxnId::with_value(t1.as_u64() - 1));
-        assert!(before_t1.entity_factoms(entity).unwrap().is_empty());
+        assert!(
+            before_t1
+                .entity_factoms(entity)
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .is_empty()
+        );
 
-        let facts = at_t1.entity_factoms(entity).unwrap();
+        let facts = at_t1
+            .entity_factoms(entity)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].txn(), t1);
         assert_eq!(facts[0].value(), &Value::String("alice".into()));
-        assert!(db.at(t2).entity_factoms(entity).unwrap().is_empty());
+        assert!(
+            db.at(t2)
+                .entity_factoms(entity)
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .is_empty()
+        );
 
-        let facts = db.at(t3).entity_factoms(entity).unwrap();
+        let facts = db
+            .at(t3)
+            .entity_factoms(entity)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].txn(), t3);
 
         store.retract(entity, name, &"alice").unwrap().unwrap();
-        assert_eq!(at_t1.entity_factoms(entity).unwrap().len(), 1);
-        assert!(store.db().entity_factoms(entity).unwrap().is_empty());
+        assert_eq!(
+            at_t1
+                .entity_factoms(entity)
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .db()
+                .entity_factoms(entity)
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -459,6 +536,7 @@ mod tests {
             .db()
             .at(t2)
             .entity_factoms(entity)
+            .collect::<Result<Vec<_>>>()
             .unwrap()
             .into_iter()
             .map(|factom| factom.value().clone())
@@ -621,6 +699,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .entity_factoms(entity)
+                .collect::<Result<Vec<_>>>()
                 .unwrap()[0]
                 .value(),
             &Value::String("one".into())
@@ -629,6 +708,7 @@ mod tests {
             db.at_time_else_current(before)
                 .unwrap()
                 .entity_factoms(entity)
+                .collect::<Result<Vec<_>>>()
                 .unwrap()[0]
                 .value(),
             &Value::String("two".into())
@@ -638,6 +718,7 @@ mod tests {
                 .at_time_else_current(before)
                 .unwrap()
                 .entity_factoms(entity)
+                .collect::<Result<Vec<_>>>()
                 .unwrap()[0]
                 .value(),
             &Value::String("one".into())
