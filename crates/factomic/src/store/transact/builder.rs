@@ -563,6 +563,10 @@ fn write_attribute_changes(
     txn: TxnId,
     changes: &AttributeChanges,
 ) -> Result<()> {
+    if changes.evictions.is_empty() && changes.inserts.is_empty() {
+        return Ok(());
+    }
+
     let evictions = changes
         .evictions
         .iter()
@@ -718,10 +722,14 @@ impl TransactionChanges {
         let key = sv_key(&slot, &region);
         let reference_key =
             ref_target(&region)?.map(|target| keys::vaest_key(target, attr, entity, &slot));
-        self.by_attribute
+        let attribute_changes = self
+            .by_attribute
             .get_mut(&(entity, attr))
-            .expect("attribute changes must be initialized before insertion")
-            .insert(key);
+            .expect("attribute changes must be initialized before insertion");
+        if attribute_changes.evictions.remove(&key).is_some() {
+            return Ok(());
+        }
+        attribute_changes.insert(key);
         if let Some(key) = reference_key {
             self.reference_inserts.insert(key);
         }
@@ -2217,6 +2225,40 @@ mod tests {
     }
 
     #[test]
+    fn canonical_rebalance_is_noop_and_does_not_tag_mixed_txn() {
+        let (_dir, store) = temp_store();
+        let items = declare_list(&store);
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let e = store.new_entity().unwrap();
+        store.push(e, items, &"a").unwrap().unwrap();
+        store.push(e, items, &"b").unwrap().unwrap();
+        let before = store
+            .db()
+            .entity_attr_factoms(e, items)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+
+        assert_eq!(store.rebalance(e, items).unwrap(), None);
+        let txn = store
+            .transact()
+            .rebalance(e, items)
+            .assert(e, name, &"alice")
+            .commit()
+            .unwrap()
+            .unwrap();
+        let log = store.db().tx_factoms(txn).unwrap();
+        assert!(log.iter().all(|factom| factom.attribute() != TX_KIND_ATTR));
+        let after = store
+            .db()
+            .entity_attr_factoms(e, items)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(after, before);
+    }
+
+    #[test]
     fn retract_entity_removes_everything_and_external_refs() {
         let (_dir, store) = temp_store();
         let name = store
@@ -2420,14 +2462,15 @@ mod tests {
             .declare_attribute(def("person/name", Type::String, CollectionKind::One))
             .unwrap();
         let e = store.new_entity().unwrap();
-        store.assert(e, name, &"a").unwrap().unwrap();
-        store
+        let original = store.assert(e, name, &"a").unwrap().unwrap();
+        let result = store
             .transact()
             .retract(e, name, &"a")
             .assert(e, name, &"a")
             .commit()
-            .unwrap()
             .unwrap();
+        assert_eq!(result, None);
+
         let factoms = store
             .db()
             .entity_factoms(e)
@@ -2435,6 +2478,196 @@ mod tests {
             .unwrap();
         assert_eq!(factoms.len(), 1);
         assert_eq!(factoms[0].value(), &Value::String("a".into()));
+        assert_eq!(factoms[0].txn(), original);
+        assert!(
+            store
+                .db()
+                .entity_history(e)
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .is_empty()
+        );
+        let historical = store
+            .db_at(original)
+            .entity_factoms(e)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(historical.len(), 1);
+        assert_eq!(historical[0].txn(), original);
+    }
+
+    #[test]
+    fn same_txn_restored_fact_can_be_retracted_again() {
+        let (_dir, store) = temp_store();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let e = store.new_entity().unwrap();
+        let original = store.assert(e, name, &"a").unwrap().unwrap();
+        let retracted = store
+            .transact()
+            .retract(e, name, &"a")
+            .assert(e, name, &"a")
+            .retract(e, name, &"a")
+            .commit()
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            store
+                .db()
+                .entity_factoms(e)
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .is_empty()
+        );
+        let history = store
+            .db()
+            .entity_history(e)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(
+            history
+                .iter()
+                .any(|factom| factom.txn() == original && factom.op() == Op::Assert)
+        );
+        assert!(
+            history
+                .iter()
+                .any(|factom| factom.txn() == retracted && factom.op() == Op::Retract)
+        );
+        assert_eq!(
+            store
+                .db_at(original)
+                .entity_value::<String>(e, name)
+                .unwrap(),
+            Some("a".into())
+        );
+        assert_eq!(
+            store
+                .db_at(retracted)
+                .entity_value::<String>(e, name)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn same_txn_replacing_then_restoring_original_is_noop() {
+        let (_dir, store) = temp_store();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let e = store.new_entity().unwrap();
+        let original = store.assert(e, name, &"a").unwrap().unwrap();
+        let result = store
+            .transact()
+            .retract(e, name, &"a")
+            .assert(e, name, &"b")
+            .assert(e, name, &"a")
+            .commit()
+            .unwrap();
+        assert_eq!(result, None);
+
+        let factoms = store
+            .db()
+            .entity_factoms(e)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(factoms.len(), 1);
+        assert_eq!(factoms[0].value(), &Value::String("a".into()));
+        assert_eq!(factoms[0].txn(), original);
+        assert!(
+            store
+                .db()
+                .entity_history(e)
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn same_txn_restoration_only_logs_effective_attributes() {
+        let (_dir, store) = temp_store();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let nickname = store
+            .declare_attribute(def("person/nickname", Type::String, CollectionKind::One))
+            .unwrap();
+        let e = store.new_entity().unwrap();
+        let original = store.assert(e, name, &"a").unwrap().unwrap();
+        let txn = store
+            .transact()
+            .retract(e, name, &"a")
+            .assert(e, name, &"a")
+            .assert(e, nickname, &"ally")
+            .commit()
+            .unwrap()
+            .unwrap();
+
+        let log = store.db().tx_factoms(txn).unwrap();
+        assert!(log.iter().all(|factom| factom.attribute() != name));
+        assert!(log.iter().any(|factom| factom.attribute() == nickname));
+        let names = store
+            .db()
+            .entity_attr_factoms(e, name)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0].txn(), original);
+        assert!(
+            store
+                .db()
+                .entity_history(e)
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn same_txn_reference_move_round_trip_is_noop() {
+        let (_dir, store) = temp_store();
+        let links = store
+            .declare_attribute(def("person/links", Type::Ref, CollectionKind::List))
+            .unwrap();
+        let source = store.new_entity().unwrap();
+        let target = store.new_entity().unwrap();
+        let original = store.push(source, links, &target).unwrap().unwrap();
+        let from = store.db().slot_at(source, links, 0).unwrap().unwrap();
+        let to = Slot::position(b"zz".to_vec()).unwrap();
+        let result = store
+            .transact()
+            .move_slot(source, links, from.clone(), to.clone())
+            .move_slot(source, links, to, from.clone())
+            .commit()
+            .unwrap();
+        assert_eq!(result, None);
+
+        let factoms = store
+            .db()
+            .entity_factoms(source)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(factoms.len(), 1);
+        assert_eq!(factoms[0].slot(), &from);
+        assert_eq!(factoms[0].txn(), original);
+        assert_eq!(factoms[0].value(), &Value::Ref(target));
+        assert_eq!(
+            store.db().referring_entities(target, links).unwrap(),
+            vec![source]
+        );
+        assert!(
+            store
+                .db()
+                .entity_history(source)
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
