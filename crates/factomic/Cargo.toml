@@ -23,5 +23,19 @@ arc-swap.workspace = true
 itertools.workspace = true
 
 [dev-dependencies]
+criterion = "0.8"
+heed = "0.23.1"
+redb = "5.0"
+rusqlite = { version = "0.43", features = ["bundled"] }
 tempfile = "3"
 trybuild = "1"
+
+[[bench]]
+name = "core"
+path = "benches/core.rs"
+harness = false
+
+[[bench]]
+name = "compare"
+path = "benches/compare.rs"
+harness = false
