@@ -1,9 +1,12 @@
 [package]
 name = "factomic-example"
 version = "0.1.0"
+description = "Runnable example for factomic's typed entity and query APIs"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
 publish = false
 
 [dependencies]

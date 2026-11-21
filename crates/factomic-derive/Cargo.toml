@@ -1,9 +1,12 @@
 [package]
 name = "factomic-derive"
 version = "0.1.0"
+description = "Derive macros for factomic's typed entity schemas and handles"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
 
 [lib]
 proc-macro = true

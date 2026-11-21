@@ -1,9 +1,12 @@
 [package]
 name = "factomic"
 version = "0.1.0"
+description = "Unitemporal, embedded fact database backed by fjall with typed entity handles and ordered list operations."
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
 
 [features]
 default = ["derive"]
