@@ -267,14 +267,15 @@ impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let db = Database::builder(path).open()?;
         let meta = db.keyspace("meta", KeyspaceCreateOptions::default)?;
-        if let Some(version) = meta.get(META_FORMAT_VERSION)? {
+        let initialize_format = if let Some(version) = meta.get(META_FORMAT_VERSION)? {
             let version = u64::from_be_bytes(version.as_ref().try_into()?);
             if version != FORMAT_VERSION {
                 return Err(Error::UnsupportedFormatVersion(version));
             }
+            false
         } else {
-            meta.insert(META_FORMAT_VERSION, FORMAT_VERSION.to_be_bytes())?;
-        }
+            true
+        };
         let attrs = db.keyspace("attrs", KeyspaceCreateOptions::default)?;
         let easvt = db.keyspace("easvt", KeyspaceCreateOptions::default)?;
         let aesvt = db.keyspace("aesvt", KeyspaceCreateOptions::default)?;
@@ -316,12 +317,11 @@ impl Store {
             current: snapshot,
             transact_lock: Mutex::new(()),
         };
-        store.sync_system_attributes()?;
-        store.persist_durable()?;
+        store.sync_system_attributes(initialize_format)?;
         Ok(store)
     }
 
-    fn sync_system_attributes(&self) -> Result<()> {
+    fn sync_system_attributes(&self, initialize_format: bool) -> Result<()> {
         let system_attrs = [
             AttributeDef {
                 name: "db/txTimestamp".into(),
@@ -349,60 +349,105 @@ impl Store {
             },
         ];
         let ids = [TX_TIMESTAMP_ATTR, TX_MOVE_ATTR, TX_KIND_ATTR];
-        for (id, def) in ids.into_iter().zip(system_attrs) {
-            let by_id_key = by_attr_key(id);
-            if self.attrs.get(&by_id_key)?.is_some() {
-                continue;
-            }
-            self.attrs
-                .insert(by_name_key(&def.name), by_name_value(id))?;
-            self.attrs.insert(by_id_key, by_attr_value(&def))?;
+        let mut batch = self.durable_batch(1 + ids.len() * 2);
+        if initialize_format {
+            batch.insert(
+                &self.meta,
+                META_FORMAT_VERSION,
+                FORMAT_VERSION.to_be_bytes(),
+            );
         }
+        for (id, def) in ids.into_iter().zip(system_attrs) {
+            let by_name_key = by_name_key(&def.name);
+            let by_id_key = by_attr_key(id);
+            let name_mapping = self.attrs.get(&by_name_key)?;
+            let definition = self.attrs.get(&by_id_key)?;
+            if let Some(id_bytes) = &name_mapping {
+                if AttributeId::try_from(id_bytes.as_ref())? != id {
+                    return Err(Error::SchemaConflict(def.name));
+                }
+            }
+            if definition.is_some() && self.attribute_def(id)? != def {
+                return Err(Error::SchemaConflict(def.name));
+            }
+            if name_mapping.is_none() || definition.is_none() {
+                batch.insert(&self.attrs, by_name_key, by_name_value(id));
+                batch.insert(&self.attrs, by_id_key, by_attr_value(&def));
+            }
+        }
+        batch.commit()?;
+        self.refresh();
         Ok(())
     }
 
     pub fn declare_attribute(&self, def: AttributeDef) -> Result<AttributeId> {
+        let [id] = self.declare_attributes([def])?;
+        Ok(id)
+    }
+
+    pub fn declare_attributes<const N: usize>(
+        &self,
+        defs: [AttributeDef; N],
+    ) -> Result<[AttributeId; N]> {
         let _guard = self.transact_lock.lock();
-        let valid_key_type = match def.kind {
-            CollectionKind::Map => {
-                matches!(def.key_type, Some(Type::String | Type::Long | Type::Ref))
+        for def in &defs {
+            let valid_key_type = match def.kind {
+                CollectionKind::Map => {
+                    matches!(def.key_type, Some(Type::String | Type::Long | Type::Ref))
+                }
+                _ => def.key_type.is_none(),
+            };
+            if !valid_key_type {
+                return Err(Error::InvalidKeyType(def.name.clone()));
             }
-            _ => def.key_type.is_none(),
-        };
-        if !valid_key_type {
-            return Err(Error::InvalidKeyType(def.name));
-        }
-        if def.is_component && def.value_type != Type::Ref {
-            return Err(Error::InvalidSchema(def.name));
+            if def.is_component && def.value_type != Type::Ref {
+                return Err(Error::InvalidSchema(def.name.clone()));
+            }
         }
 
-        let by_name_key = by_name_key(&def.name);
+        let mut next_id = self.meta.get(META_NEXT_ATTR)?.map_or_else(
+            || AttributeId::new(FIRST_USER_ATTR),
+            |id| AttributeId::new(u16::from_be_bytes(id[..2].try_into().unwrap())),
+        );
+        let initial_next_id = next_id;
+        let mut pending = std::collections::HashMap::new();
+        let mut ids = Vec::with_capacity(N);
+        let mut batch = self.durable_batch(1 + N * 2);
 
-        let attribute_id = if let Some(id_bytes) = self.attrs.get(&by_name_key)? {
-            let id = AttributeId::new(u16::from_be_bytes(id_bytes[..2].try_into().unwrap()));
-            let existing = self.attribute_def(id)?;
-            if existing != def {
-                return Err(Error::SchemaConflict(def.name));
+        for def in defs {
+            if let Some((id, pending_def)) = pending.get(&def.name) {
+                if pending_def != &def {
+                    return Err(Error::SchemaConflict(def.name));
+                }
+                ids.push(*id);
+                continue;
             }
-            id
-        } else {
-            let new_id = self.meta.get(META_NEXT_ATTR)?.map_or_else(
-                || AttributeId::new(FIRST_USER_ATTR),
-                |id| AttributeId::new(u16::from_be_bytes(id[..2].try_into().unwrap())),
-            );
-            self.meta.insert(
-                META_NEXT_ATTR,
-                (AttributeId::new(new_id.as_u16() + 1)).to_be_bytes(),
-            )?;
-            new_id
-        };
-        self.attrs
-            .insert(&by_name_key, attribute_id.to_be_bytes())?;
-        let by_id_key = by_attr_key(attribute_id);
-        self.attrs.insert(by_id_key, by_attr_value(&def))?;
-        self.persist_durable()?;
+
+            let by_name_key = by_name_key(&def.name);
+            let id = if let Some(id_bytes) = self.attrs.get(&by_name_key)? {
+                let id = AttributeId::try_from(id_bytes.as_ref())?;
+                let existing = self.attribute_def(id)?;
+                if existing != def {
+                    return Err(Error::SchemaConflict(def.name));
+                }
+                id
+            } else {
+                let id = next_id;
+                next_id = AttributeId::new(next_id.as_u16() + 1);
+                batch.insert(&self.attrs, &by_name_key, by_name_value(id));
+                batch.insert(&self.attrs, by_attr_key(id), by_attr_value(&def));
+                pending.insert(def.name.clone(), (id, def.clone()));
+                id
+            };
+            ids.push(id);
+        }
+
+        if next_id != initial_next_id {
+            batch.insert(&self.meta, META_NEXT_ATTR, next_id.to_be_bytes());
+        }
+        batch.commit()?;
         self.refresh();
-        Ok(attribute_id)
+        Ok(ids.try_into().unwrap())
     }
 
     pub fn attribute_def(&self, id: AttributeId) -> Result<AttributeDef> {
@@ -545,6 +590,124 @@ mod tests {
         assert_eq!(def.name, "person/name");
         assert_eq!(def.value_type, Type::String);
         assert!(!def.indexed);
+    }
+
+    #[test]
+    fn system_attributes_are_visible_immediately_after_open() {
+        let (_dir, store) = temp_store();
+        let db = store.db();
+        for name in ["db/txTimestamp", "db/txMove", "db/txKind"] {
+            assert!(db.named_attribute_def(name).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn declare_attributes_is_atomic_across_snapshots_and_reopen() {
+        let (dir, store) = temp_store();
+        let historical = store.db();
+        let definitions = [
+            def("person/name", Type::String, CollectionKind::One),
+            AttributeDef {
+                indexed: true,
+                ..def("person/age", Type::Long, CollectionKind::One)
+            },
+        ];
+
+        let [name, age] = store.declare_attributes(definitions.clone()).unwrap();
+        assert_eq!(name.as_u16(), FIRST_USER_ATTR);
+        assert_eq!(age.as_u16(), FIRST_USER_ATTR + 1);
+        for definition in &definitions {
+            assert_eq!(historical.attribute_id(&definition.name).unwrap(), None);
+        }
+        let current = store.db();
+        assert_eq!(current.attribute_id("person/name").unwrap(), Some(name));
+        assert_eq!(current.attribute_id("person/age").unwrap(), Some(age));
+        assert_eq!(
+            current.named_attribute_def("person/age").unwrap(),
+            Some(definitions[1].clone())
+        );
+
+        drop(current);
+        drop(historical);
+        drop(store);
+        let reopened = Store::open(dir.path()).unwrap();
+        assert_eq!(
+            reopened.declare_attributes(definitions).unwrap(),
+            [name, age]
+        );
+        let next = reopened
+            .declare_attribute(def("person/nickname", Type::String, CollectionKind::One))
+            .unwrap();
+        assert_eq!(next.as_u16(), FIRST_USER_ATTR + 2);
+    }
+
+    #[test]
+    fn declare_attributes_late_validation_failure_writes_nothing() {
+        let (_dir, store) = temp_store();
+        let result = store.declare_attributes([
+            def("person/name", Type::String, CollectionKind::One),
+            AttributeDef {
+                key_type: Some(Type::String),
+                ..def("person/invalid", Type::String, CollectionKind::One)
+            },
+        ]);
+        assert!(matches!(result, Err(Error::InvalidKeyType(name)) if name == "person/invalid"));
+        assert_eq!(store.db().attribute_id("person/name").unwrap(), None);
+        let next = store
+            .declare_attribute(def("person/next", Type::String, CollectionKind::One))
+            .unwrap();
+        assert_eq!(next.as_u16(), FIRST_USER_ATTR);
+    }
+
+    #[test]
+    fn declare_attributes_late_conflict_writes_nothing() {
+        let (_dir, store) = temp_store();
+        let existing = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let result = store.declare_attributes([
+            def("person/fresh", Type::String, CollectionKind::One),
+            def("person/name", Type::Long, CollectionKind::One),
+        ]);
+        assert!(matches!(result, Err(Error::SchemaConflict(name)) if name == "person/name"));
+        assert_eq!(store.db().attribute_id("person/fresh").unwrap(), None);
+        assert_eq!(
+            store.db().attribute_id("person/name").unwrap(),
+            Some(existing)
+        );
+        let next = store
+            .declare_attribute(def("person/next", Type::String, CollectionKind::One))
+            .unwrap();
+        assert_eq!(next.as_u16(), existing.as_u16() + 1);
+    }
+
+    #[test]
+    fn declare_attributes_identical_duplicates_allocate_once() {
+        let (_dir, store) = temp_store();
+        let definition = def("person/name", Type::String, CollectionKind::One);
+        let [first, second] = store
+            .declare_attributes([definition.clone(), definition])
+            .unwrap();
+        assert_eq!(first, second);
+        let next = store
+            .declare_attribute(def("person/next", Type::String, CollectionKind::One))
+            .unwrap();
+        assert_eq!(next.as_u16(), first.as_u16() + 1);
+    }
+
+    #[test]
+    fn declare_attributes_conflicting_duplicates_write_nothing() {
+        let (_dir, store) = temp_store();
+        let result = store.declare_attributes([
+            def("person/name", Type::String, CollectionKind::One),
+            def("person/name", Type::Long, CollectionKind::One),
+        ]);
+        assert!(matches!(result, Err(Error::SchemaConflict(name)) if name == "person/name"));
+        assert_eq!(store.db().attribute_id("person/name").unwrap(), None);
+        let next = store
+            .declare_attribute(def("person/next", Type::String, CollectionKind::One))
+            .unwrap();
+        assert_eq!(next.as_u16(), FIRST_USER_ATTR);
     }
 
     #[test]

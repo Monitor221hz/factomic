@@ -672,6 +672,19 @@ fn declaration_preflight_prevents_partial_schema_writes() -> Result<()> {
 }
 
 #[test]
+fn derived_multi_field_schema_survives_reopen() -> Result<()> {
+    let (dir, store) = temp_store();
+    let declared = EvolutionV2Schema::declare(&store)?;
+    drop(store);
+
+    let reopened = Arc::new(Store::open(dir.path())?);
+    let loaded = EvolutionV2Schema::get(&reopened.db())?.expect("evolution schema");
+    assert_eq!(loaded.shared, declared.shared);
+    assert_eq!(loaded.added, declared.added);
+    Ok(())
+}
+
+#[test]
 fn generated_code_supports_shadowed_standard_names() -> Result<()> {
     use shadowing::{ModelEntity, ModelEntityMut};
 

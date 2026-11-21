@@ -62,25 +62,11 @@ fn expand_schema(model: &Model) -> TokenStream {
         }
     });
     let declarations = fields.iter().map(|field| {
-        let ident = &field.ident;
-        let def_ident = derived_ident("", ident, "_def");
-        quote!(#ident: store.declare_attribute(Self::#def_ident())?)
-    });
-    let preflights = fields.iter().map(|field| {
-        let name = LitStr::new(&field.name, Span::call_site());
         let def_ident = derived_ident("", &field.ident, "_def");
-        quote! {
-            if let ::core::option::Option::Some(__factomic_existing) =
-                __factomic_db.named_attribute_def(#name)?
-            {
-                if __factomic_existing != Self::#def_ident() {
-                    return ::core::result::Result::Err(::factomic::Error::SchemaConflict(
-                        ::std::string::String::from(#name),
-                    ));
-                }
-            }
-        }
+        quote!(Self::#def_ident())
     });
+    let declaration_idents = fields.iter().map(|field| &field.ident);
+    let declaration_init_idents = fields.iter().map(|field| &field.ident);
     let lookups = fields.iter().map(|field| {
         let ident = &field.ident;
         let name = LitStr::new(&field.name, Span::call_site());
@@ -116,10 +102,10 @@ fn expand_schema(model: &Model) -> TokenStream {
 
         impl ::factomic::Schema for #schema_ident {
             fn declare(store: &::factomic::Store) -> ::factomic::Result<Self> {
-                let __factomic_db = store.db();
-                #(#preflights)*
+                let [#(#declaration_idents),*] =
+                    store.declare_attributes([#(#declarations),*])?;
                 ::core::result::Result::Ok(Self {
-                    #(#declarations),*
+                    #(#declaration_init_idents),*
                 })
             }
 
