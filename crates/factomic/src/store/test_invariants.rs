@@ -9,6 +9,7 @@ use crate::value::Value;
 
 type Records = BTreeMap<Vec<u8>, Vec<u8>>;
 type CheckResult<T> = std::result::Result<T, String>;
+type Mutation = fn(&Store);
 
 fn entries(snapshot: &Snapshot, keyspace: &Keyspace) -> CheckResult<Records> {
     snapshot
@@ -516,7 +517,7 @@ mod tests {
 
     #[test]
     fn checker_detects_independent_corruption() {
-        let mutations: [(&str, fn(&Store)); 8] = [
+        let mutations: [(&str, Mutation); 8] = [
             ("missing aesvt", |store| {
                 store.aesvt.remove(first_key(&store.aesvt)).unwrap();
             }),

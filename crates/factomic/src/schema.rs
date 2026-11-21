@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::Weak;
 use std::time::SystemTime;
 
 use arc_swap::ArcSwap;
@@ -94,6 +93,7 @@ impl<T: Entity> From<&DbHandle<T>> for EntityId {
 pub struct DbWeakHandle<T> {
     pub entity: EntityId,
     pub db: Arc<Db>,
+    #[allow(dead_code)]
     model: ArcSwap<T>,
 }
 
@@ -251,12 +251,14 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    #![allow(dead_code)]
+
     use std::{collections::HashMap, sync::Arc};
 
     use tempfile::TempDir;
 
     use crate::{
-        AttributeDef, AttributeId, CollectionKind, EntityId, Error, Result, Store, Type,
+        AttributeDef, AttributeId, CollectionKind, EntityId, Result, Store, Type,
         schema::{DbHandle, Entity, EntityTransaction, Schema},
     };
 
@@ -462,7 +464,6 @@ mod tests {
         fn friends(&self) -> impl Iterator<Item = Result<(String, DbHandle<Person>)>> + '_ {
             self.db
                 .entity_keyvalues::<String, EntityId>(self.entity, self.schema.friends)
-                .into_iter()
                 .map(|r| match r {
                     Ok(p) => {
                         let entity = self.db.entity(p.1)?.unwrap(); // if Ok(p) entity must exist

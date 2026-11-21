@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::{collections::HashMap, sync::Arc};
 
 use factomic::{DbHandle, DbHandleMut, EntityId, Result, Store};

@@ -28,7 +28,7 @@ pub enum FieldKind {
     Many(Cell),
     Map {
         key: Cell,
-        value: Cell,
+        value: Box<Cell>,
         optional_values: bool,
     },
 }
@@ -302,7 +302,7 @@ fn parse_field_kind(ty: &Type, value: bool, reference: bool) -> Result<FieldKind
             let (value_cell, optional_values) = parse_optional_cell(value_ty, value, reference)?;
             Ok(FieldKind::Map {
                 key,
-                value: value_cell,
+                value: Box::new(value_cell),
                 optional_values,
             })
         }
@@ -439,7 +439,7 @@ fn standard_type(ty: &Type) -> Option<StandardType> {
     let path = type_path(ty).ok()?;
     let segments: Vec<_> = path.path.segments.iter().collect();
     let name = segments.last()?.ident.to_string();
-    let standard = match segments.as_slice() {
+    match segments.as_slice() {
         [_] => match name.as_str() {
             "Option" => Some(StandardType::Option),
             "Vec" => Some(StandardType::Vec),
@@ -492,8 +492,7 @@ fn standard_type(ty: &Type) -> Option<StandardType> {
         [root, _] if root.ident == "factomic" && name == "EntityId" => Some(StandardType::EntityId),
         [root, _] if root.ident == "jiff" && name == "Timestamp" => Some(StandardType::Timestamp),
         _ => None,
-    };
-    standard
+    }
 }
 
 fn type_name_and_arguments(ty: &Type) -> Result<(String, &PathArguments)> {

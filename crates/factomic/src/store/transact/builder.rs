@@ -124,7 +124,7 @@ enum PlannedOp {
 
 pub struct Transaction<'a> {
     pub(crate) store: &'a Store,
-    pub(crate) ops: Vec<PlannedOp>,
+    ops: Vec<PlannedOp>,
 }
 
 impl Store {

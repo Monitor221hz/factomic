@@ -1,4 +1,3 @@
-use std::alloc::System;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -449,10 +448,10 @@ impl Store {
             let by_id_key = by_attr_key(id);
             let name_mapping = self.attrs.get(&by_name_key)?;
             let definition = self.attrs.get(&by_id_key)?;
-            if let Some(id_bytes) = &name_mapping {
-                if AttributeId::try_from(id_bytes.as_ref())? != id {
-                    return Err(Error::SchemaConflict(def.name));
-                }
+            if let Some(id_bytes) = &name_mapping
+                && AttributeId::try_from(id_bytes.as_ref())? != id
+            {
+                return Err(Error::SchemaConflict(def.name));
             }
             if definition.is_some() && self.attribute_def(id)? != def {
                 return Err(Error::SchemaConflict(def.name));

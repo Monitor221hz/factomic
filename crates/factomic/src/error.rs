@@ -1,4 +1,4 @@
-use crate::{MapKey, value::Type};
+use crate::value::Type;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

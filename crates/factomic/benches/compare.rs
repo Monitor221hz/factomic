@@ -91,7 +91,7 @@ fn fjall_commit(size: usize) -> impl FnMut(&mut (TempDir, Database, Keyspace)) {
         for index in 0..size as u64 {
             batch.insert(keyspace, index.to_be_bytes().to_vec(), b"value".to_vec());
         }
-        black_box(batch.commit().unwrap())
+        batch.commit().unwrap()
     }
 }
 
@@ -111,7 +111,7 @@ fn redb_commit(size: usize) -> impl FnMut(&mut (TempDir, RedbDatabase)) {
                 table.insert(index, "value").unwrap();
             }
         }
-        black_box(txn.commit().unwrap())
+        txn.commit().unwrap()
     }
 }
 
@@ -134,7 +134,7 @@ fn sqlite_commit(size: usize) -> impl FnMut(&mut (TempDir, Connection)) {
             txn.execute("INSERT INTO kv (k, v) VALUES (?1, 'value')", params![index])
                 .unwrap();
         }
-        black_box(txn.commit().unwrap())
+        txn.commit().unwrap()
     }
 }
 
@@ -166,7 +166,7 @@ fn heed_commit(size: usize) -> impl FnMut(&mut (TempDir, Env, HeedDb)) {
         for index in 0..size as u32 {
             db.put(&mut txn, &index, "value").unwrap();
         }
-        black_box(txn.commit().unwrap())
+        txn.commit().unwrap()
     }
 }
 
