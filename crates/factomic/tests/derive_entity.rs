@@ -685,6 +685,21 @@ fn derived_multi_field_schema_survives_reopen() -> Result<()> {
 }
 
 #[test]
+fn derived_schema_respects_declaration_cutoff() -> Result<()> {
+    let (_dir, store) = temp_store();
+    let before = store.db().txn();
+    let declared = EvolutionV2Schema::declare(&store)?;
+    let declaration = store.db().txn();
+    let latest = store.db();
+
+    assert!(EvolutionV2Schema::get(&latest.at(before))?.is_none());
+    let historical = EvolutionV2Schema::get(&latest.at(declaration))?.expect("declared schema");
+    assert_eq!(historical.shared, declared.shared);
+    assert_eq!(historical.added, declared.added);
+    Ok(())
+}
+
+#[test]
 fn generated_code_supports_shadowed_standard_names() -> Result<()> {
     use shadowing::{ModelEntity, ModelEntityMut};
 

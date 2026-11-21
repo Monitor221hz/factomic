@@ -30,14 +30,14 @@ pub struct AttributeDef {
     pub is_component: bool,
 }
 
-const FORMAT_VERSION: u64 = 1;
+const FORMAT_VERSION: u64 = 2;
 const META_FORMAT_VERSION: &[u8] = b"format_version";
 const META_NEXT_ATTR: &[u8; 9] = b"next_attr";
 const META_ENTITY_PREFIX: u8 = 0x02;
 
 #[derive(Clone)]
 pub struct Db {
-    txn: TxnId,
+    snapshot_txn: TxnId,
     as_of: Option<TxnId>,
     snapshot: fjall::Snapshot,
     attrs: Keyspace,
@@ -57,7 +57,7 @@ impl Db {
     /// In other words, it returns all transactions before and including the cutoff.
     pub fn at(self: &Arc<Self>, txn: TxnId) -> Arc<Self> {
         Arc::new(Self {
-            txn: self.txn,
+            snapshot_txn: self.snapshot_txn,
             as_of: Some(txn),
             snapshot: self.snapshot.clone(),
             attrs: self.attrs.clone(),
@@ -77,7 +77,7 @@ impl Db {
     /// This returns an identical clone if the original self was already the latest snapshot.
     pub fn newest(self: &Arc<Self>) -> Arc<Self> {
         Arc::new(Self {
-            txn: self.txn,
+            snapshot_txn: self.snapshot_txn,
             as_of: None,
             snapshot: self.snapshot.clone(),
             attrs: self.attrs.clone(),
@@ -91,6 +91,14 @@ impl Db {
             vaest_h: self.vaest_h.clone(),
             txlog: self.txlog.clone(),
         })
+    }
+
+    pub fn txn(&self) -> TxnId {
+        self.snapshot_txn
+    }
+
+    pub fn as_of(&self) -> Option<TxnId> {
+        self.as_of
     }
 
     pub fn at_time(self: &Arc<Self>, time: SystemTime) -> Result<Option<Arc<Self>>> {
@@ -109,40 +117,20 @@ impl Db {
         }
     }
 
-    pub fn attribute_def(&self, id: AttributeId) -> Result<AttributeDef> {
+    fn attribute_declaration(&self, id: AttributeId) -> Result<(AttributeDef, TxnId)> {
         let payload = self
             .snapshot
             .get(&self.attrs, by_attr_key(id))?
             .ok_or_else(|| Error::UnknownAttribute(format!("{id:?}")))?;
+        decode_attr_value(&payload)
+    }
 
-        if payload.len() < 4 {
-            return Err(Error::CorruptKey {
-                expected: 4,
-                got: payload.len(),
-            });
+    pub fn attribute_def(&self, id: AttributeId) -> Result<AttributeDef> {
+        let (def, declared_at) = self.attribute_declaration(id)?;
+        if self.as_of.is_some_and(|cutoff| declared_at > cutoff) {
+            return Err(Error::UnknownAttribute(format!("{id:?}")));
         }
-        let key_type = match payload[payload.len() - 1] {
-            0x00 => None,
-            tag => Some(type_for_tag(tag)?),
-        };
-        let kind = CollectionKind::try_from(payload[payload.len() - 2])?;
-        let flags = payload[payload.len() - 3];
-        let indexed = flags & 1 != 0;
-        let is_component = flags & 0b10 != 0;
-
-        let value_type = type_for_tag(payload[payload.len() - 4])?;
-
-        let name = String::from_utf8(payload[..payload.len() - 4].to_vec())
-            .map_err(|_| Error::CorruptPrimitive(Type::String))?;
-
-        Ok(AttributeDef {
-            name,
-            value_type,
-            kind,
-            key_type,
-            indexed,
-            is_component,
-        })
+        Ok(def)
     }
 
     pub fn named_attribute_def(&self, name: &str) -> Result<Option<AttributeDef>> {
@@ -155,7 +143,12 @@ impl Db {
     pub fn attribute_id(&self, name: &str) -> Result<Option<AttributeId>> {
         let by_name_key = by_name_key(name);
         if let Some(id_bytes) = self.snapshot.get(&self.attrs, by_name_key)? {
-            Ok(Some(AttributeId::try_from(id_bytes.as_ref())?))
+            let id = AttributeId::try_from(id_bytes.as_ref())?;
+            let (_, declared_at) = self.attribute_declaration(id)?;
+            if self.as_of.is_some_and(|cutoff| declared_at > cutoff) {
+                return Ok(None);
+            }
+            Ok(Some(id))
         } else {
             Ok(None)
         }
@@ -191,14 +184,49 @@ fn by_attr_key(attr_id: AttributeId) -> Vec<u8> {
 }
 
 #[inline]
-fn by_attr_value(def: &AttributeDef) -> Vec<u8> {
-    let mut by_id_value = Vec::with_capacity(def.name.len() + 4);
+fn by_attr_value(declared_at: TxnId, def: &AttributeDef) -> Vec<u8> {
+    let mut by_id_value = Vec::with_capacity(size_of::<TxnId>() + def.name.len() + 4);
+    by_id_value.extend_from_slice(&declared_at.to_be_bytes());
     by_id_value.extend_from_slice(def.name.as_bytes());
     by_id_value.push(tag_for_type(def.value_type));
     by_id_value.push(def.indexed as u8 | (def.is_component as u8) << 1);
     by_id_value.push(def.kind.to_byte());
     by_id_value.push(def.key_type.map_or(0x00, tag_for_type));
     by_id_value
+}
+
+fn decode_attr_value(payload: &[u8]) -> Result<(AttributeDef, TxnId)> {
+    let metadata_len = size_of::<TxnId>() + 4;
+    if payload.len() < metadata_len {
+        return Err(Error::CorruptKey {
+            expected: metadata_len,
+            got: payload.len(),
+        });
+    }
+    let declared_at = TxnId::try_from(&payload[..size_of::<TxnId>()])?;
+    let key_type = match payload[payload.len() - 1] {
+        0x00 => None,
+        tag => Some(type_for_tag(tag)?),
+    };
+    let kind = CollectionKind::try_from(payload[payload.len() - 2])?;
+    let flags = payload[payload.len() - 3];
+    let indexed = flags & 1 != 0;
+    let is_component = flags & 0b10 != 0;
+    let value_type = type_for_tag(payload[payload.len() - 4])?;
+    let name = String::from_utf8(payload[size_of::<TxnId>()..payload.len() - 4].to_vec())
+        .map_err(|_| Error::CorruptPrimitive(Type::String))?;
+
+    Ok((
+        AttributeDef {
+            name,
+            value_type,
+            kind,
+            key_type,
+            indexed,
+            is_component,
+        },
+        declared_at,
+    ))
 }
 
 #[inline]
@@ -232,7 +260,7 @@ impl Store {
     pub(crate) fn swap(&self, txn: TxnId) {
         self.current.store(
             Db {
-                txn,
+                snapshot_txn: txn,
                 as_of: None,
                 snapshot: self.db.snapshot(),
                 attrs: self.attrs.clone(),
@@ -251,7 +279,7 @@ impl Store {
     }
 
     pub(crate) fn refresh(&self) {
-        self.swap(self.current.load().txn);
+        self.swap(self.current.load().snapshot_txn);
     }
 
     pub(crate) fn durable_batch(&self, capacity: usize) -> OwnedWriteBatch {
@@ -286,8 +314,15 @@ impl Store {
         let avest_h = db.keyspace("avest_h", KeyspaceCreateOptions::default)?;
         let vaest_h = db.keyspace("vaest_h", KeyspaceCreateOptions::default)?;
         let txlog = db.keyspace("txlog", KeyspaceCreateOptions::default)?;
+        let snapshot_txn = if let Some(guard) = txlog.last_key_value() {
+            let (key, _) = guard.into_inner()?;
+            let (txn, ..) = crate::keys::decode_txlog_key(&key)?;
+            txn
+        } else {
+            TxnId::with_value(0)
+        };
         let snapshot = ArcSwap::from_pointee(Db {
-            txn: TxnId::with_value(0),
+            snapshot_txn,
             as_of: None,
             snapshot: db.snapshot(),
             attrs: attrs.clone(),
@@ -372,7 +407,11 @@ impl Store {
             }
             if name_mapping.is_none() || definition.is_none() {
                 batch.insert(&self.attrs, by_name_key, by_name_value(id));
-                batch.insert(&self.attrs, by_id_key, by_attr_value(&def));
+                batch.insert(
+                    &self.attrs,
+                    by_id_key,
+                    by_attr_value(TxnId::with_value(0), &def),
+                );
             }
         }
         batch.commit()?;
@@ -411,8 +450,9 @@ impl Store {
         );
         let initial_next_id = next_id;
         let mut pending = std::collections::HashMap::new();
+        let mut declaration_txn = None;
         let mut ids = Vec::with_capacity(N);
-        let mut batch = self.durable_batch(1 + N * 2);
+        let mut batch = self.durable_batch(5 + N * 2);
 
         for def in defs {
             if let Some((id, pending_def)) = pending.get(&def.name) {
@@ -433,9 +473,17 @@ impl Store {
                 id
             } else {
                 let id = next_id;
+                let txn = match declaration_txn {
+                    Some(txn) => txn,
+                    None => {
+                        let txn = self.alloc_txn_id()?;
+                        declaration_txn = Some(txn);
+                        txn
+                    }
+                };
                 next_id = AttributeId::new(next_id.as_u16() + 1);
                 batch.insert(&self.attrs, &by_name_key, by_name_value(id));
-                batch.insert(&self.attrs, by_attr_key(id), by_attr_value(&def));
+                batch.insert(&self.attrs, by_attr_key(id), by_attr_value(txn, &def));
                 pending.insert(def.name.clone(), (id, def.clone()));
                 id
             };
@@ -445,8 +493,15 @@ impl Store {
         if next_id != initial_next_id {
             batch.insert(&self.meta, META_NEXT_ATTR, next_id.to_be_bytes());
         }
+        if let Some(txn) = declaration_txn {
+            self.record_tx_timestamp(&mut batch, txn);
+        }
         batch.commit()?;
-        self.refresh();
+        if let Some(txn) = declaration_txn {
+            self.swap(txn);
+        } else {
+            self.refresh();
+        }
         Ok(ids.try_into().unwrap())
     }
 
@@ -455,35 +510,7 @@ impl Store {
             .attrs
             .get(by_attr_key(id))?
             .ok_or_else(|| Error::UnknownAttribute(format!("{id:?}")))?;
-
-        if payload.len() < 4 {
-            return Err(Error::CorruptKey {
-                expected: 4,
-                got: payload.len(),
-            });
-        }
-        let key_type = match payload[payload.len() - 1] {
-            0x00 => None,
-            tag => Some(type_for_tag(tag)?),
-        };
-        let kind = CollectionKind::try_from(payload[payload.len() - 2])?;
-        let flags = payload[payload.len() - 3];
-        let indexed = flags & 1 != 0;
-        let is_component = flags & 0b10 != 0;
-
-        let value_type = type_for_tag(payload[payload.len() - 4])?;
-
-        let name = String::from_utf8(payload[..payload.len() - 4].to_vec())
-            .map_err(|_| Error::CorruptPrimitive(Type::String))?;
-
-        Ok(AttributeDef {
-            name,
-            value_type,
-            kind,
-            key_type,
-            indexed,
-            is_component,
-        })
+        Ok(decode_attr_value(&payload)?.0)
     }
 
     pub(crate) fn alloc_txn_id(&self) -> Result<TxnId> {
@@ -569,15 +596,17 @@ mod tests {
 
     #[test]
     fn open_rejects_unsupported_format_version() {
-        let dir = TempDir::new().unwrap();
-        {
-            let db = Database::builder(dir.path()).open().unwrap();
-            let meta = db.keyspace("meta", KeyspaceCreateOptions::default).unwrap();
-            meta.insert(META_FORMAT_VERSION, 2_u64.to_be_bytes())
-                .unwrap();
+        for version in [1_u64, 3] {
+            let dir = TempDir::new().unwrap();
+            {
+                let db = Database::builder(dir.path()).open().unwrap();
+                let meta = db.keyspace("meta", KeyspaceCreateOptions::default).unwrap();
+                meta.insert(META_FORMAT_VERSION, version.to_be_bytes())
+                    .unwrap();
+            }
+            let result = Store::open(dir.path());
+            assert!(matches!(result, Err(Error::UnsupportedFormatVersion(v)) if v == version));
         }
-        let result = Store::open(dir.path());
-        assert!(matches!(result, Err(Error::UnsupportedFormatVersion(2))));
     }
 
     #[test]
@@ -599,6 +628,146 @@ mod tests {
         for name in ["db/txTimestamp", "db/txMove", "db/txKind"] {
             assert!(db.named_attribute_def(name).unwrap().is_some());
         }
+    }
+
+    #[test]
+    fn newest_only_clears_cutoff_within_captured_snapshot() {
+        let (_dir, store) = temp_store();
+        let entity = store.new_entity().unwrap();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let declaration = store.db().txn();
+        let stale = store.db();
+        let asserted = store.assert(entity, name, &"alice").unwrap().unwrap();
+
+        assert!(stale.newest().entity_factoms(entity).next().is_none());
+        assert!(stale.at(asserted).entity_factoms(entity).next().is_none());
+        assert_eq!(stale.newest().txn(), declaration);
+        let latest = store.db();
+        let historical = latest.at(declaration);
+        assert_eq!(historical.txn(), asserted);
+        assert_eq!(historical.as_of(), Some(declaration));
+        let newest = historical.newest();
+        assert_eq!(newest.txn(), asserted);
+        assert_eq!(newest.as_of(), None);
+        assert_eq!(
+            newest.entity_value::<String>(entity, name).unwrap(),
+            Some("alice".into())
+        );
+    }
+
+    #[test]
+    fn schema_declarations_are_timestamped_and_cutoff_aware() {
+        let (_dir, store) = temp_store();
+        let initial = store.db();
+        assert_eq!(initial.txn(), TxnId::with_value(0));
+        assert!(initial.attribute_id("db/txTimestamp").unwrap().is_some());
+
+        let [name, age] = store
+            .declare_attributes([
+                def("person/name", Type::String, CollectionKind::One),
+                def("person/age", Type::Long, CollectionKind::One),
+            ])
+            .unwrap();
+        let declaration = store.db().txn();
+        assert!(declaration > initial.txn());
+        let db = store.db();
+        let before = db.at(TxnId::with_value(declaration.as_u64() - 1));
+        assert_eq!(before.attribute_id("person/name").unwrap(), None);
+        assert_eq!(before.named_attribute_def("person/age").unwrap(), None);
+        assert!(matches!(
+            before.attribute_def(name),
+            Err(Error::UnknownAttribute(_))
+        ));
+        assert!(before.attribute_id("db/txTimestamp").unwrap().is_some());
+
+        let at_declaration = db.at(declaration);
+        assert_eq!(
+            at_declaration.attribute_id("person/name").unwrap(),
+            Some(name)
+        );
+        assert_eq!(
+            at_declaration.attribute_id("person/age").unwrap(),
+            Some(age)
+        );
+        assert!(
+            at_declaration
+                .named_attribute_def("person/name")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.tx_factoms(declaration)
+                .unwrap()
+                .iter()
+                .any(|factom| factom.attribute() == TX_TIMESTAMP_ATTR)
+        );
+
+        store
+            .declare_attributes([
+                def("person/name", Type::String, CollectionKind::One),
+                def("person/age", Type::Long, CollectionKind::One),
+            ])
+            .unwrap();
+        assert_eq!(store.db().txn(), declaration);
+    }
+
+    #[test]
+    fn mixed_schema_declarations_preserve_previous_visibility() {
+        let (_dir, store) = temp_store();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let first = store.db().txn();
+        let age = store
+            .declare_attributes([
+                def("person/name", Type::String, CollectionKind::One),
+                def("person/age", Type::Long, CollectionKind::One),
+            ])
+            .unwrap()[1];
+        let second = store.db().txn();
+        assert!(second > first);
+
+        let at_first = store.db().at(first);
+        assert_eq!(at_first.attribute_id("person/name").unwrap(), Some(name));
+        assert_eq!(at_first.attribute_id("person/age").unwrap(), None);
+        let at_second = store.db().at(second);
+        assert_eq!(at_second.attribute_id("person/name").unwrap(), Some(name));
+        assert_eq!(at_second.attribute_id("person/age").unwrap(), Some(age));
+    }
+
+    #[test]
+    fn reopen_recovers_declaration_and_latest_txns() {
+        let (dir, store) = temp_store();
+        let entity = store.new_entity().unwrap();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let declaration = store.db().txn();
+        drop(store);
+
+        let reopened = Store::open(dir.path()).unwrap();
+        assert_eq!(reopened.db().txn(), declaration);
+        assert_eq!(
+            reopened.db().attribute_id("person/name").unwrap(),
+            Some(name)
+        );
+        let asserted = reopened.assert(entity, name, &"alice").unwrap().unwrap();
+        drop(reopened);
+
+        let reopened = Store::open(dir.path()).unwrap();
+        assert_eq!(reopened.db().txn(), asserted);
+        let historical = reopened.db().at(declaration);
+        assert_eq!(historical.attribute_id("person/name").unwrap(), Some(name));
+        assert_eq!(
+            historical.entity_value::<String>(entity, name).unwrap(),
+            None
+        );
+        assert_eq!(
+            reopened.db().entity_value::<String>(entity, name).unwrap(),
+            Some("alice".into())
+        );
     }
 
     #[test]

@@ -228,7 +228,7 @@ impl Store {
         );
     }
 
-    fn record_tx_timestamp(&self, batch: &mut OwnedWriteBatch, txn: TxnId) {
+    pub(super) fn record_tx_timestamp(&self, batch: &mut OwnedWriteBatch, txn: TxnId) {
         let region = region(&Timestamp::now());
         let entity = txn.entity_id();
         let payload = txn.to_be_bytes();

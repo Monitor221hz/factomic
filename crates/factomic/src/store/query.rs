@@ -330,16 +330,23 @@ impl Db {
     }
 
     pub fn entity_history(&self, entity: EntityId) -> impl Iterator<Item = Result<Factom>> + '_ {
+        let cutoff = self.as_of;
         self.snapshot
             .prefix(
                 &self.easvt_h,
                 keys::escape_identity(&keys::easvt_entity_prefix(entity)),
             )
-            .map(|item| {
-                let (key, payload) = item.into_inner()?;
-                let (e, a, k, v, txn) = keys::decode_easvt_history_key(&key)?;
-                let op = Op::try_from(payload[0])?;
-                Ok(Factom::new(e, a, k, v, txn, op))
+            .filter_map(move |item| {
+                let decoded = (|| -> Result<_> {
+                    let (key, payload) = item.into_inner()?;
+                    let (e, a, k, v, txn) = keys::decode_easvt_history_key(&key)?;
+                    let op = Op::try_from(payload[0])?;
+                    Ok(Factom::new(e, a, k, v, txn, op))
+                })();
+                match decoded {
+                    Ok(factom) if cutoff.is_some_and(|cutoff| factom.txn() > cutoff) => None,
+                    other => Some(other),
+                }
             })
     }
 
@@ -418,6 +425,10 @@ impl Db {
     }
 
     pub fn tx_factoms(&self, txn: TxnId) -> Result<Vec<Factom>> {
+        if self.as_of.is_some_and(|cutoff| txn > cutoff) {
+            return Ok(Vec::new());
+        }
+
         let mut factoms = Vec::new();
         for item in self.snapshot.prefix(&self.txlog, keys::txlog_prefix(txn)) {
             let (key, payload) = item.into_inner()?;
@@ -591,6 +602,50 @@ mod tests {
     }
 
     #[test]
+    fn history_and_txlog_respect_as_of() {
+        let (_dir, store) = temp_store();
+        let entity = store.new_entity().unwrap();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let t1 = store.assert(entity, name, &"one").unwrap().unwrap();
+        let t2 = store.assert(entity, name, &"two").unwrap().unwrap();
+        store.retract(entity, name, &"two").unwrap().unwrap();
+        let db = store.db();
+
+        let at_t1 = db.at(t1);
+        let history = at_t1
+            .entity_history(entity)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].txn(), t1);
+        assert_eq!(history[0].op(), Op::Assert);
+        assert!(at_t1.tx_factoms(t2).unwrap().is_empty());
+        assert!(!at_t1.tx_factoms(t1).unwrap().is_empty());
+
+        let history = db
+            .at(t2)
+            .entity_history(entity)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(history.len(), 3);
+        assert!(history.iter().all(|factom| factom.txn() <= t2));
+        assert!(
+            history
+                .iter()
+                .any(|factom| factom.txn() == t2 && factom.op() == Op::Retract)
+        );
+
+        let history = db
+            .entity_history(entity)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(history.len(), 4);
+        assert!(!db.tx_factoms(t2).unwrap().is_empty());
+    }
+
+    #[test]
     fn non_indexed_queries_are_rejected() {
         let (_dir, store) = temp_store();
         let attr = store
@@ -694,15 +749,27 @@ mod tests {
         let name = store
             .declare_attribute(def("person/name", Type::String, CollectionKind::Many))
             .unwrap();
+        let declaration = store.db().txn();
+        std::thread::sleep(Duration::from_millis(2));
         let t1 = store.assert(entity, name, &"one").unwrap().unwrap();
         std::thread::sleep(Duration::from_millis(2));
         let t2 = store.assert(entity, name, &"two").unwrap().unwrap();
         let db = store.db();
+        let declaration_time = tx_time(&db, declaration);
         let t1_time = tx_time(&db, t1);
         let t2_time = tx_time(&db, t2);
         let between = t1_time + (t2_time.duration_since(t1_time).unwrap() / 2);
 
-        assert_eq!(db.txn_at(t1_time - Duration::from_micros(1)).unwrap(), None);
+        assert_eq!(
+            db.txn_at(declaration_time - Duration::from_micros(1))
+                .unwrap(),
+            None
+        );
+        assert_eq!(db.txn_at(declaration_time).unwrap(), Some(declaration));
+        assert_eq!(
+            db.txn_at(t1_time - Duration::from_micros(1)).unwrap(),
+            Some(declaration)
+        );
         assert_eq!(db.txn_at(t1_time).unwrap(), Some(t1));
         assert_eq!(db.txn_at(between).unwrap(), Some(t1));
         assert_eq!(db.txn_at(t2_time).unwrap(), Some(t2));
@@ -719,16 +786,29 @@ mod tests {
         let name = store
             .declare_attribute(def("person/name", Type::String, CollectionKind::One))
             .unwrap();
+        let declaration = store.db().txn();
+        std::thread::sleep(Duration::from_millis(2));
         let t1 = store.assert(entity, name, &"one").unwrap().unwrap();
         std::thread::sleep(Duration::from_millis(2));
         let t2 = store.assert(entity, name, &"two").unwrap().unwrap();
         let db = store.db();
+        let declaration_time = tx_time(&db, declaration);
         let t1_time = tx_time(&db, t1);
         let t2_time = tx_time(&db, t2);
-        let before = t1_time - Duration::from_micros(1);
+        let before_all = declaration_time - Duration::from_micros(1);
+        let before_t1 = t1_time - Duration::from_micros(1);
         let at_t1 = db.at(t1);
 
-        assert!(db.at_time(before).unwrap().is_none());
+        assert!(db.at_time(before_all).unwrap().is_none());
+        let declaration_view = db.at_time(before_t1).unwrap().unwrap();
+        assert_eq!(declaration_view.as_of(), Some(declaration));
+        assert!(
+            declaration_view
+                .entity_factoms(entity)
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(at_t1.txn_at(t2_time).unwrap(), Some(t1));
         assert_eq!(
             at_t1
@@ -742,7 +822,7 @@ mod tests {
             &Value::String("one".into())
         );
         assert_eq!(
-            db.at_time_else_current(before)
+            db.at_time_else_current(before_all)
                 .unwrap()
                 .entity_factoms(entity)
                 .collect::<Result<Vec<_>>>()
@@ -752,7 +832,7 @@ mod tests {
         );
         assert_eq!(
             at_t1
-                .at_time_else_current(before)
+                .at_time_else_current(before_all)
                 .unwrap()
                 .entity_factoms(entity)
                 .collect::<Result<Vec<_>>>()
