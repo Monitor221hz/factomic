@@ -1,0 +1,5 @@
+error: component fields must contain entity references
+ --> tests/ui/invalid_component.rs:4:12
+  |
+4 |     value: String,
+  |            ^^^^^^

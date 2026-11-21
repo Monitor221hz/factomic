@@ -1,0 +1,11 @@
+error: duplicate generated read method `values_seek`
+ --> tests/ui/duplicate_map_method.rs:6:5
+  |
+6 |     values_seek: String,
+  |     ^^^^^^^^^^^
+
+error: duplicate generated mutation method `set_values_seek`
+ --> tests/ui/duplicate_map_method.rs:6:5
+  |
+6 |     values_seek: String,
+  |     ^^^^^^^^^^^

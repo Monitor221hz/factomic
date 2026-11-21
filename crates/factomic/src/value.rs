@@ -169,6 +169,29 @@ impl From<i64> for Value {
     }
 }
 
+macro_rules! impl_small_int {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl TryFrom<&Value> for $ty {
+                type Error = Error;
+
+                fn try_from(value: &Value) -> Result<Self> {
+                    let value = i64::try_from(value)?;
+                    <$ty>::try_from(value).map_err(|_| Error::CorruptPrimitive(Type::Long))
+                }
+            }
+
+            impl From<$ty> for Value {
+                fn from(value: $ty) -> Self {
+                    Value::Long(value as i64)
+                }
+            }
+        )*
+    };
+}
+
+impl_small_int!(i8, i16, i32, u8, u16, u32);
+
 impl TryFrom<&Value> for f64 {
     type Error = Error;
 
@@ -404,6 +427,33 @@ mod tests {
         assert_eq!(<&str>::try_from(&string).unwrap(), "hello");
         let bytes = Value::Bytes(vec![1, 2, 3]);
         assert_eq!(<&[u8]>::try_from(&bytes).unwrap(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn small_ints_round_trip_through_value() {
+        assert_eq!(i8::try_from(&Value::from(-8i8)).unwrap(), -8);
+        assert_eq!(i16::try_from(&Value::from(-16i16)).unwrap(), -16);
+        assert_eq!(i32::try_from(&Value::from(-32i32)).unwrap(), -32);
+        assert_eq!(u8::try_from(&Value::from(8u8)).unwrap(), 8);
+        assert_eq!(u16::try_from(&Value::from(16u16)).unwrap(), 16);
+        assert_eq!(u32::try_from(&Value::from(32u32)).unwrap(), 32);
+        assert_eq!(Value::from(42u32), Value::Long(42));
+    }
+
+    #[test]
+    fn small_int_narrowing_rejects_overflow() {
+        assert!(matches!(
+            i8::try_from(&Value::Long(128)),
+            Err(Error::CorruptPrimitive(Type::Long))
+        ));
+        assert!(matches!(
+            u8::try_from(&Value::Long(-1)),
+            Err(Error::CorruptPrimitive(Type::Long))
+        ));
+        assert!(matches!(
+            u32::try_from(&Value::Long(i64::MAX)),
+            Err(Error::CorruptPrimitive(Type::Long))
+        ));
     }
 
     #[test]

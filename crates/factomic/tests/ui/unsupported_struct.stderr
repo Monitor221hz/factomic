@@ -1,0 +1,5 @@
+error: Entity requires a struct with named fields
+ --> tests/ui/unsupported_struct.rs:2:8
+  |
+2 | struct Model(String);
+  |        ^^^^^

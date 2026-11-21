@@ -9,7 +9,7 @@ use crate::factom::{Factom, Op, Slot};
 use crate::id::{AttributeId, EntityId, TX_TIMESTAMP_ATTR, TxnId};
 use crate::primitive::EncodePrimitive;
 use crate::store::Db;
-use crate::value::tag_for_type;
+use crate::value::{Type, tag_for_type};
 use crate::{MapKey, Value, keys};
 
 const TXN_LEN: usize = size_of::<TxnId>();
@@ -247,6 +247,10 @@ impl Db {
         self.prefix_entity_factoms(keys::easvt_entity_prefix(entity))
     }
 
+    pub fn entity_exists(&self, entity: EntityId) -> Result<bool> {
+        Ok(self.entity_factoms(entity).next().transpose()?.is_some())
+    }
+
     pub fn entity_attr_factoms(
         &self,
         entity: EntityId,
@@ -345,6 +349,9 @@ impl Db {
         value: &V,
     ) -> Result<Vec<EntityId>> {
         let def = self.attribute_def(attribute)?;
+        if !def.indexed {
+            return Err(Error::AttributeNotIndexed(def.name.clone()));
+        }
         if V::TYPE != def.value_type {
             return Err(Error::TypeMismatch {
                 attribute: def.name.clone(),
@@ -363,6 +370,7 @@ impl Db {
                 let (_, _, entity, _, _) = keys::decode_avest_history_key(&key)?;
                 entities.push(entity);
             }
+            entities.dedup();
             return Ok(entities);
         }
 
@@ -371,6 +379,7 @@ impl Db {
             let (_, _, entity, _) = keys::decode_avest_key(&key)?;
             entities.push(entity);
         }
+        entities.dedup();
         Ok(entities)
     }
 
@@ -379,6 +388,14 @@ impl Db {
         target: EntityId,
         attribute: AttributeId,
     ) -> Result<Vec<EntityId>> {
+        let def = self.attribute_def(attribute)?;
+        if def.value_type != Type::Ref {
+            return Err(Error::TypeMismatch {
+                attribute: def.name.clone(),
+                expected: Type::Ref,
+                got: def.value_type,
+            });
+        }
         let prefix = keys::vaest_target_attr_prefix(target, attribute);
         let mut entities = Vec::new();
         if let Some(cutoff) = self.as_of {
@@ -387,6 +404,7 @@ impl Db {
                 let (_, _, source, _, _) = keys::decode_vaest_history_key(&key)?;
                 entities.push(source);
             }
+            entities.dedup();
             return Ok(entities);
         }
 
@@ -395,6 +413,7 @@ impl Db {
             let (_, _, source, _) = keys::decode_vaest_key(&key)?;
             entities.push(source);
         }
+        entities.dedup();
         Ok(entities)
     }
 
@@ -569,6 +588,24 @@ mod tests {
         assert_eq!(db.at(t1).slot_at(entity, items, 1).unwrap(), None);
         assert_eq!(db.at(t2).slot_at(entity, items, 1).unwrap(), Some(second));
         assert_eq!(db.slot_at(entity, items, 1).unwrap(), None);
+    }
+
+    #[test]
+    fn non_indexed_queries_are_rejected() {
+        let (_dir, store) = temp_store();
+        let attr = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let target = store.new_entity().unwrap();
+
+        assert!(matches!(
+            store.db().entities_with_value(attr, &"Alice"),
+            Err(Error::AttributeNotIndexed(_))
+        ));
+        assert!(matches!(
+            store.db().referring_entities(target, attr),
+            Err(Error::TypeMismatch { .. })
+        ));
     }
 
     #[test]

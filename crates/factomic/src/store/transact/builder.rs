@@ -53,6 +53,12 @@ enum PlannedOp {
         ty: Type,
         regions: Vec<Vec<u8>>,
     },
+    ReplaceMany {
+        entity: EntityId,
+        attr: AttributeId,
+        ty: Type,
+        regions: Vec<Vec<u8>>,
+    },
     ReplaceListAt {
         entity: EntityId,
         attr: AttributeId,
@@ -60,11 +66,33 @@ enum PlannedOp {
         ordinal: usize,
         region: Vec<u8>,
     },
+    InsertListAt {
+        entity: EntityId,
+        attr: AttributeId,
+        ty: Type,
+        ordinal: usize,
+        region: Vec<u8>,
+    },
+    RemoveListAt {
+        entity: EntityId,
+        attr: AttributeId,
+        ordinal: usize,
+    },
+    MoveListAt {
+        entity: EntityId,
+        attr: AttributeId,
+        from_ordinal: usize,
+        to_ordinal: usize,
+    },
     ReplaceMap {
         entity: EntityId,
         attr: AttributeId,
         ty: Type,
         entries: Vec<(MapKey, Vec<u8>)>,
+    },
+    Clear {
+        entity: EntityId,
+        attr: AttributeId,
     },
     RemoveSlot {
         entity: EntityId,
@@ -257,6 +285,11 @@ impl<'a> Transaction<'a> {
         self
     }
 
+    pub fn clear(&mut self, entity: EntityId, attr: AttributeId) -> &mut Self {
+        self.ops.push(PlannedOp::Clear { entity, attr });
+        self
+    }
+
     pub fn push<V: EncodePrimitive>(
         &mut self,
         entity: EntityId,
@@ -308,6 +341,25 @@ impl<'a> Transaction<'a> {
         self
     }
 
+    pub fn replace_many<V: EncodePrimitive>(
+        &mut self,
+        entity: EntityId,
+        attr: AttributeId,
+        values: impl IntoIterator<Item = V>,
+    ) -> &mut Self {
+        let regions = values
+            .into_iter()
+            .map(|value| value::region(&value))
+            .collect();
+        self.ops.push(PlannedOp::ReplaceMany {
+            entity,
+            attr,
+            ty: V::TYPE,
+            regions,
+        });
+        self
+    }
+
     pub fn replace_list_at<V: EncodePrimitive>(
         &mut self,
         entity: EntityId,
@@ -321,6 +373,53 @@ impl<'a> Transaction<'a> {
             ty: V::TYPE,
             ordinal,
             region: value::region(value),
+        });
+        self
+    }
+
+    pub fn insert_list_at<V: EncodePrimitive>(
+        &mut self,
+        entity: EntityId,
+        attr: AttributeId,
+        ordinal: usize,
+        value: &V,
+    ) -> &mut Self {
+        self.ops.push(PlannedOp::InsertListAt {
+            entity,
+            attr,
+            ty: V::TYPE,
+            ordinal,
+            region: value::region(value),
+        });
+        self
+    }
+
+    pub fn remove_list_at(
+        &mut self,
+        entity: EntityId,
+        attr: AttributeId,
+        ordinal: usize,
+    ) -> &mut Self {
+        self.ops.push(PlannedOp::RemoveListAt {
+            entity,
+            attr,
+            ordinal,
+        });
+        self
+    }
+
+    pub fn move_list_at(
+        &mut self,
+        entity: EntityId,
+        attr: AttributeId,
+        from_ordinal: usize,
+        to_ordinal: usize,
+    ) -> &mut Self {
+        self.ops.push(PlannedOp::MoveListAt {
+            entity,
+            attr,
+            from_ordinal,
+            to_ordinal,
         });
         self
     }
@@ -884,6 +983,12 @@ fn plan_op(store: &Store, op: PlannedOp, changes: &mut TransactionChanges) -> Re
             ty,
             regions,
         } => plan_replace_list(store, changes, entity, attr, ty, regions),
+        PlannedOp::ReplaceMany {
+            entity,
+            attr,
+            ty,
+            regions,
+        } => plan_replace_many(store, changes, entity, attr, ty, regions),
         PlannedOp::ReplaceListAt {
             entity,
             attr,
@@ -891,12 +996,31 @@ fn plan_op(store: &Store, op: PlannedOp, changes: &mut TransactionChanges) -> Re
             ordinal,
             region,
         } => plan_replace_list_at(store, changes, entity, attr, ty, ordinal, region),
+        PlannedOp::InsertListAt {
+            entity,
+            attr,
+            ty,
+            ordinal,
+            region,
+        } => plan_insert_list_at(store, changes, entity, attr, ty, ordinal, region),
+        PlannedOp::RemoveListAt {
+            entity,
+            attr,
+            ordinal,
+        } => plan_remove_list_at(store, changes, entity, attr, ordinal),
+        PlannedOp::MoveListAt {
+            entity,
+            attr,
+            from_ordinal,
+            to_ordinal,
+        } => plan_move_list_at(store, changes, entity, attr, from_ordinal, to_ordinal),
         PlannedOp::ReplaceMap {
             entity,
             attr,
             ty,
             entries,
         } => plan_replace_map(store, changes, entity, attr, ty, entries),
+        PlannedOp::Clear { entity, attr } => plan_clear(store, changes, entity, attr),
         PlannedOp::RemoveSlot { entity, attr, slot } => {
             let def = store.attribute_def(attr)?;
             if !matches!(def.kind, CollectionKind::List | CollectionKind::Map) {
@@ -999,6 +1123,19 @@ fn plan_remove(
     changes.evict(entity, attr, visible.swap_remove(index))
 }
 
+fn plan_clear(
+    store: &Store,
+    changes: &mut TransactionChanges,
+    entity: EntityId,
+    attr: AttributeId,
+) -> Result<()> {
+    let def = store.attribute_def(attr)?;
+    if def.kind != CollectionKind::One {
+        return Err(Error::MismatchedKey(def.name.clone()));
+    }
+    plan_remove(store, changes, def, entity, attr, Slot::Empty)
+}
+
 fn plan_insert_at(
     store: &Store,
     changes: &mut TransactionChanges,
@@ -1092,6 +1229,43 @@ fn plan_rebalance(
     Ok(())
 }
 
+fn plan_replace_many(
+    store: &Store,
+    changes: &mut TransactionChanges,
+    entity: EntityId,
+    attr: AttributeId,
+    ty: Type,
+    regions: Vec<Vec<u8>>,
+) -> Result<()> {
+    let def = check_type(store, attr, ty)?;
+    if def.kind != CollectionKind::Many {
+        return Err(Error::MismatchedKey(def.name.clone()));
+    }
+    for region in &regions {
+        check_component_owner(store, changes, &def, entity, attr, region)?;
+    }
+
+    let replacements: BTreeSet<_> = regions.into_iter().collect();
+    let visible = visible_factoms(store, changes, entity, attr)?;
+    if visible.len() == replacements.len()
+        && visible
+            .iter()
+            .zip(&replacements)
+            .all(|(current, region)| current.slot == Slot::Empty && current.region == *region)
+    {
+        return Ok(());
+    }
+
+    changes.ensure(def, entity, attr);
+    for factom in visible {
+        changes.evict(entity, attr, factom)?;
+    }
+    for region in replacements {
+        changes.insert(entity, attr, Slot::Empty, region)?;
+    }
+    Ok(())
+}
+
 fn plan_replace_list(
     store: &Store,
     changes: &mut TransactionChanges,
@@ -1154,6 +1328,89 @@ fn plan_replace_list_at(
     };
     let slot = factom.slot.clone();
     plan_assert(store, changes, def, entity, attr, slot, region)
+}
+
+fn plan_insert_list_at(
+    store: &Store,
+    changes: &mut TransactionChanges,
+    entity: EntityId,
+    attr: AttributeId,
+    ty: Type,
+    ordinal: usize,
+    region: Vec<u8>,
+) -> Result<()> {
+    let def = check_type(store, attr, ty)?;
+    if def.kind != CollectionKind::List {
+        return Err(Error::MismatchedKey(def.name.clone()));
+    }
+    let visible = visible_factoms(store, changes, entity, attr)?;
+    if ordinal > visible.len() {
+        return Err(Error::SlotNotFound(def.name.clone()));
+    }
+    let left = ordinal.checked_sub(1).and_then(|index| visible.get(index));
+    let right = visible.get(ordinal);
+    let slot = mint_between(
+        left.map(|factom| &factom.slot),
+        right.map(|factom| &factom.slot),
+    )?;
+    plan_assert(store, changes, def, entity, attr, slot, region)
+}
+
+fn plan_remove_list_at(
+    store: &Store,
+    changes: &mut TransactionChanges,
+    entity: EntityId,
+    attr: AttributeId,
+    ordinal: usize,
+) -> Result<()> {
+    let def = store.attribute_def(attr)?;
+    if def.kind != CollectionKind::List {
+        return Err(Error::MismatchedKey(def.name.clone()));
+    }
+    let visible = visible_factoms(store, changes, entity, attr)?;
+    let Some(factom) = visible.get(ordinal) else {
+        return Err(Error::SlotNotFound(def.name.clone()));
+    };
+    let slot = factom.slot.clone();
+    plan_remove(store, changes, def, entity, attr, slot)
+}
+
+fn plan_move_list_at(
+    store: &Store,
+    changes: &mut TransactionChanges,
+    entity: EntityId,
+    attr: AttributeId,
+    from_ordinal: usize,
+    to_ordinal: usize,
+) -> Result<()> {
+    let def = store.attribute_def(attr)?;
+    if def.kind != CollectionKind::List {
+        return Err(Error::MismatchedKey(def.name.clone()));
+    }
+    let visible = visible_factoms(store, changes, entity, attr)?;
+    let Some(factom) = visible.get(from_ordinal) else {
+        return Err(Error::SlotNotFound(def.name.clone()));
+    };
+    if to_ordinal >= visible.len() {
+        return Err(Error::SlotNotFound(def.name.clone()));
+    }
+    if from_ordinal == to_ordinal {
+        return Ok(());
+    }
+    let region = factom.region.clone();
+    let from_slot = factom.slot.clone();
+    let mut remaining = visible;
+    remaining.remove(from_ordinal);
+    let left = to_ordinal
+        .checked_sub(1)
+        .and_then(|index| remaining.get(index));
+    let right = remaining.get(to_ordinal);
+    let to_slot = mint_between(
+        left.map(|factom| &factom.slot),
+        right.map(|factom| &factom.slot),
+    )?;
+    plan_remove(store, changes, def.clone(), entity, attr, from_slot)?;
+    plan_assert(store, changes, def, entity, attr, to_slot, region)
 }
 
 fn plan_replace_map(
@@ -1408,6 +1665,12 @@ mod tests {
     fn declare_list(store: &Store) -> AttributeId {
         store
             .declare_attribute(def("person/items", Type::String, CollectionKind::List))
+            .unwrap()
+    }
+
+    fn declare_many(store: &Store) -> AttributeId {
+        store
+            .declare_attribute(def("person/tags", Type::String, CollectionKind::Many))
             .unwrap()
     }
 
@@ -1688,6 +1951,8 @@ mod tests {
         assert!(matches!(put_on_list, Err(Error::MismatchedKey(_))));
         let remove_on_one = store.remove(e, name, Slot::Empty);
         assert!(matches!(remove_on_one, Err(Error::MismatchedKey(_))));
+        let clear_on_map = store.transact().clear(e, scores).commit();
+        assert!(matches!(clear_on_map, Err(Error::MismatchedKey(_))));
     }
 
     #[test]
@@ -1908,13 +2173,19 @@ mod tests {
             .clone();
         assert_ne!(fractional, anchor);
 
-        let txn = store.rebalance(e, items).unwrap().unwrap();
+        let txn = store
+            .transact()
+            .push(e, items, &"d")
+            .rebalance(e, items)
+            .commit()
+            .unwrap()
+            .unwrap();
         let factoms = store
             .db()
             .entity_factoms(e)
             .collect::<Result<Vec<_>>>()
             .unwrap();
-        assert_eq!(factoms.len(), 3);
+        assert_eq!(factoms.len(), 4);
         assert_eq!(
             factoms
                 .iter()
@@ -1923,7 +2194,8 @@ mod tests {
             vec![
                 Value::String("a".into()),
                 Value::String("b".into()),
-                Value::String("c".into())
+                Value::String("c".into()),
+                Value::String("d".into())
             ]
         );
         let mut index = FractionalIndex::default();
@@ -2323,6 +2595,200 @@ mod tests {
     }
 
     #[test]
+    fn replace_many_rebuilds_smaller_empty_and_larger_sets() {
+        let (_dir, store) = temp_store();
+        let tags = declare_many(&store);
+        let e = store.new_entity().unwrap();
+        for value in ["c", "a", "b"] {
+            store.assert(e, tags, &value).unwrap().unwrap();
+        }
+
+        store
+            .transact()
+            .replace_many(e, tags, ["x"])
+            .commit()
+            .unwrap()
+            .unwrap();
+        assert_eq!(values(&store, e), vec![Value::String("x".into())]);
+
+        store
+            .transact()
+            .replace_many(e, tags, std::iter::empty::<&str>())
+            .commit()
+            .unwrap()
+            .unwrap();
+        assert!(values(&store, e).is_empty());
+
+        store
+            .transact()
+            .replace_many(e, tags, ["z", "y"])
+            .commit()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            values(&store, e),
+            vec![Value::String("y".into()), Value::String("z".into())]
+        );
+    }
+
+    #[test]
+    fn replace_many_accounts_for_surrounding_pending_operations_and_duplicate_values() {
+        let (_dir, store) = temp_store();
+        let tags = declare_many(&store);
+        let e = store.new_entity().unwrap();
+
+        store
+            .transact()
+            .assert(e, tags, &"discarded")
+            .replace_many(e, tags, ["b", "a", "b"])
+            .assert(e, tags, &"c")
+            .commit()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            values(&store, e),
+            vec![
+                Value::String("a".into()),
+                Value::String("b".into()),
+                Value::String("c".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn clear_removes_committed_value_and_is_idempotent() {
+        let (_dir, store) = temp_store();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let e = store.new_entity().unwrap();
+        store.assert(e, name, &"committed").unwrap().unwrap();
+
+        store.transact().clear(e, name).commit().unwrap().unwrap();
+        assert_eq!(store.db().entity_value::<String>(e, name).unwrap(), None);
+        let history = store.db().entity_history(e).flatten().collect::<Vec<_>>();
+        assert!(history.iter().any(|factom| {
+            factom.op() == Op::Retract && factom.value() == &Value::String("committed".into())
+        }));
+        assert_eq!(store.transact().clear(e, name).commit().unwrap(), None);
+    }
+
+    #[test]
+    fn clear_handles_pending_assertions_and_followup_values() {
+        let (_dir, store) = temp_store();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let e = store.new_entity().unwrap();
+
+        let result = store
+            .transact()
+            .assert(e, name, &"pending")
+            .clear(e, name)
+            .commit()
+            .unwrap();
+        assert_eq!(result, None);
+        assert!(
+            store
+                .db()
+                .entity_factoms(e)
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .is_empty()
+        );
+
+        store
+            .transact()
+            .clear(e, name)
+            .assert(e, name, &"after")
+            .commit()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.db().entity_value::<String>(e, name).unwrap(),
+            Some("after".into())
+        );
+    }
+
+    #[test]
+    fn clear_retracts_committed_and_cancels_pending_overwrite() {
+        let (_dir, store) = temp_store();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let e = store.new_entity().unwrap();
+        store.assert(e, name, &"committed").unwrap().unwrap();
+
+        store
+            .transact()
+            .assert(e, name, &"pending")
+            .clear(e, name)
+            .commit()
+            .unwrap()
+            .unwrap();
+        assert_eq!(store.db().entity_value::<String>(e, name).unwrap(), None);
+        let history = store.db().entity_history(e).flatten().collect::<Vec<_>>();
+        assert!(history.iter().any(|factom| {
+            factom.op() == Op::Retract && factom.value() == &Value::String("committed".into())
+        }));
+        assert!(!history.iter().any(|factom| {
+            factom.op() == Op::Assert && factom.value() == &Value::String("pending".into())
+        }));
+    }
+
+    #[test]
+    fn incremental_list_operations_work_with_pending_changes() {
+        let (_dir, store) = temp_store();
+        let items = declare_list(&store);
+        let e = store.new_entity().unwrap();
+        for value in ["a", "b", "d"] {
+            store.push(e, items, &value).unwrap().unwrap();
+        }
+
+        store
+            .transact()
+            .insert_list_at(e, items, 2, &"c")
+            .remove_list_at(e, items, 0)
+            .insert_list_at(e, items, 3, &"e")
+            .move_list_at(e, items, 0, 3)
+            .commit()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            values(&store, e),
+            vec![
+                Value::String("c".into()),
+                Value::String("d".into()),
+                Value::String("e".into()),
+                Value::String("b".into()),
+            ]
+        );
+
+        assert!(matches!(
+            store.transact().insert_list_at(e, items, 99, &"x").commit(),
+            Err(Error::SlotNotFound(_))
+        ));
+        assert!(matches!(
+            store.transact().remove_list_at(e, items, 99).commit(),
+            Err(Error::SlotNotFound(_))
+        ));
+        assert!(matches!(
+            store.transact().move_list_at(e, items, 0, 99).commit(),
+            Err(Error::SlotNotFound(_))
+        ));
+
+        let empty = store.new_entity().unwrap();
+        store
+            .transact()
+            .insert_list_at(empty, items, 0, &"x")
+            .commit()
+            .unwrap()
+            .unwrap();
+        assert_eq!(values(&store, empty), vec![Value::String("x".into())]);
+    }
+
+    #[test]
     fn replace_list_rebuilds_shorter_empty_and_longer_lists() {
         let (_dir, store) = temp_store();
         let items = declare_list(&store);
@@ -2382,35 +2848,6 @@ mod tests {
                 Value::String("c".into()),
             ]
         );
-    }
-
-    #[test]
-    fn same_txn_rebalance_includes_pending_inserts() {
-        let (_dir, store) = temp_store();
-        let items = declare_list(&store);
-        let e = store.new_entity().unwrap();
-        store.push(e, items, &"a").unwrap().unwrap();
-        store
-            .transact()
-            .push(e, items, &"b")
-            .rebalance(e, items)
-            .commit()
-            .unwrap()
-            .unwrap();
-        let factoms = store
-            .db()
-            .entity_factoms(e)
-            .collect::<Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(
-            values(&store, e),
-            vec![Value::String("a".into()), Value::String("b".into())]
-        );
-        let mut index = FractionalIndex::default();
-        for factom in &factoms {
-            assert_eq!(factom.slot(), &Slot::with_index(&index).unwrap());
-            index = FractionalIndex::new_after(&index);
-        }
     }
 
     #[test]

@@ -1,0 +1,5 @@
+error: Vec<u8> is ambiguous; bytes and lists of bytes are not currently supported
+ --> tests/ui/unsupported_bytes.rs:3:12
+  |
+3 |     value: Vec<u8>,
+  |            ^^^^^^^

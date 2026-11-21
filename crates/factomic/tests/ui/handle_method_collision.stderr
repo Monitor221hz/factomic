@@ -1,0 +1,35 @@
+error: generated field accessor `exists` collides with an inherent handle method
+ --> tests/ui/handle_method_collision.rs:3:5
+  |
+3 |     exists: String,
+  |     ^^^^^^
+
+error: generated field accessor `read` collides with an inherent handle method
+ --> tests/ui/handle_method_collision.rs:4:5
+  |
+4 |     read: String,
+  |     ^^^^
+
+error: generated field accessor `read_at` collides with an inherent handle method
+ --> tests/ui/handle_method_collision.rs:5:5
+  |
+5 |     read_at: String,
+  |     ^^^^^^^
+
+error: generated field accessor `read_at_time` collides with an inherent handle method
+ --> tests/ui/handle_method_collision.rs:6:5
+  |
+6 |     read_at_time: String,
+  |     ^^^^^^^^^^^^
+
+error: generated field accessor `transact` collides with an inherent handle method
+ --> tests/ui/handle_method_collision.rs:7:5
+  |
+7 |     transact: String,
+  |     ^^^^^^^^
+
+error: generated field accessor `weak_from_pointee` collides with an inherent handle method
+ --> tests/ui/handle_method_collision.rs:8:5
+  |
+8 |     weak_from_pointee: String,
+  |     ^^^^^^^^^^^^^^^^^

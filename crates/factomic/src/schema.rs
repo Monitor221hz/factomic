@@ -20,6 +20,32 @@ pub trait Schema: Sized {
     fn get(db: &Arc<Db>) -> Result<Option<Self>>;
 }
 
+pub struct DbQuery<T: Entity> {
+    db: Arc<Db>,
+    schema: Arc<T::Schema>,
+}
+
+impl<T: Entity> DbQuery<T> {
+    pub fn db(&self) -> &Arc<Db> {
+        &self.db
+    }
+
+    pub fn schema(&self) -> &T::Schema {
+        self.schema.as_ref()
+    }
+
+    pub fn handles(&self, entities: impl IntoIterator<Item = EntityId>) -> Vec<DbHandle<T>> {
+        entities
+            .into_iter()
+            .map(|entity| DbHandle {
+                db: self.db.clone(),
+                schema: self.schema.clone(),
+                entity,
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone)]
 pub struct DbHandle<T: Entity> {
     pub db: Arc<Db>,
@@ -28,6 +54,10 @@ pub struct DbHandle<T: Entity> {
 }
 
 impl<T: Entity> DbHandle<T> {
+    pub fn exists(&self) -> Result<bool> {
+        self.db.entity_exists(self.entity)
+    }
+
     pub fn read_at(&self, txn: TxnId) -> Result<Option<DbHandle<T>>> {
         let db = self.db.at(txn);
         db.entity(self.entity)
@@ -76,6 +106,16 @@ impl<T: Entity> From<DbWeakHandle<T>> for EntityId {
 impl<T> DbWeakHandle<T> {}
 
 impl Db {
+    pub fn query<T: Entity>(self: &Arc<Self>) -> Result<Option<DbQuery<T>>> {
+        let Some(schema) = T::Schema::get(self)? else {
+            return Ok(None);
+        };
+        Ok(Some(DbQuery {
+            db: self.clone(),
+            schema: schema.into(),
+        }))
+    }
+
     pub fn entity<T>(self: &Arc<Self>, entity: EntityId) -> Result<Option<DbHandle<T>>>
     where
         T: Entity,
@@ -83,6 +123,9 @@ impl Db {
         let Some(schema) = T::Schema::get(self)? else {
             return Ok(None);
         };
+        if !self.entity_exists(entity)? {
+            return Ok(None);
+        }
         Ok(Some(DbHandle {
             db: self.clone(),
             schema: schema.into(),
@@ -104,18 +147,50 @@ impl<T: Entity> From<DbHandleMut<T>> for EntityId {
     }
 }
 
+impl<T: Entity> From<&DbHandleMut<T>> for EntityId {
+    fn from(value: &DbHandleMut<T>) -> Self {
+        value.entity
+    }
+}
+
 pub struct EntityTransaction<'a, T: Entity> {
     handle: &'a DbHandleMut<T>,
     transaction: Transaction<'a>,
 }
 
 impl<'a, T: Entity> EntityTransaction<'a, T> {
-    pub fn commit(mut self) -> Result<Option<TxnId>> {
+    pub fn entity(&self) -> EntityId {
+        self.handle.entity
+    }
+
+    pub fn schema(&self) -> &T::Schema {
+        self.handle.schema.as_ref()
+    }
+
+    pub fn transaction_mut(&mut self) -> &mut Transaction<'a> {
+        &mut self.transaction
+    }
+
+    pub fn retract(&mut self) -> &mut Self {
+        let entity = self.entity();
+        self.transaction_mut().retract_entity(entity);
+        self
+    }
+
+    pub fn commit(&mut self) -> Result<Option<TxnId>> {
         self.transaction.commit()
     }
 }
 
 impl<T: Entity> DbHandleMut<T> {
+    pub fn exists(&self) -> Result<bool> {
+        self.db.db().entity_exists(self.entity)
+    }
+
+    pub fn retract(&self) -> Result<Option<TxnId>> {
+        self.db.retract_entity(self.entity)
+    }
+
     pub fn transact(&self) -> EntityTransaction<'_, T> {
         EntityTransaction {
             handle: self,
@@ -145,6 +220,16 @@ impl<T: Entity> DbHandleMut<T> {
 }
 
 impl Store {
+    pub fn create<T: Entity>(self: &Arc<Self>) -> Result<DbHandleMut<T>> {
+        let schema = T::Schema::declare(self)?;
+        let entity = self.new_entity()?;
+        Ok(DbHandleMut {
+            db: self.clone(),
+            schema: schema.into(),
+            entity,
+        })
+    }
+
     pub fn entity_mut<T>(self: &Arc<Self>, entity: EntityId) -> Result<Option<DbHandleMut<T>>>
     where
         T: Entity,
@@ -152,6 +237,10 @@ impl Store {
         let Some(schema) = T::Schema::get(&self.db())? else {
             return Ok(None);
         };
+        let db = self.db();
+        if !db.entity_exists(entity)? {
+            return Ok(None);
+        }
         Ok(Some(DbHandleMut {
             db: self.clone(),
             schema: schema.into(),
@@ -507,10 +596,14 @@ mod tests {
     fn typed_mutations_accept_entity_ids_and_borrowed_handles() {
         let (_dir, store) = temp_store();
         PersonSchema::declare(&store).unwrap();
-        let person_id = store.new_entity().unwrap();
+        let person = store.create::<Person>().unwrap();
+        let person_id = person.entity;
+        assert_eq!(EntityId::from(&person), person_id);
         let first = store.new_entity().unwrap();
         let second = store.new_entity().unwrap();
-        let person = store.entity_mut::<Person>(person_id).unwrap().unwrap();
+        let schema = PersonSchema::declare(&store).unwrap();
+        store.assert(first, schema.name, &"first").unwrap();
+        store.assert(second, schema.name, &"second").unwrap();
         let first_handle = store.db().entity::<Person>(first).unwrap().unwrap();
 
         let mut tx = person.transact();

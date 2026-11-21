@@ -30,6 +30,8 @@ pub struct AttributeDef {
     pub is_component: bool,
 }
 
+const FORMAT_VERSION: u64 = 1;
+const META_FORMAT_VERSION: &[u8] = b"format_version";
 const META_NEXT_ATTR: &[u8; 9] = b"next_attr";
 const META_ENTITY_PREFIX: u8 = 0x02;
 
@@ -144,18 +146,15 @@ impl Db {
     }
 
     pub fn named_attribute_def(&self, name: &str) -> Result<Option<AttributeDef>> {
-        let by_name_key = by_name_key(name);
-        if let Some(id_bytes) = self.attrs.get(&by_name_key)? {
-            let id = AttributeId::try_from(id_bytes.as_ref())?;
-            Ok(Some(self.attribute_def(id)?))
-        } else {
-            Ok(None)
-        }
+        let Some(id) = self.attribute_id(name)? else {
+            return Ok(None);
+        };
+        Ok(Some(self.attribute_def(id)?))
     }
 
     pub fn attribute_id(&self, name: &str) -> Result<Option<AttributeId>> {
         let by_name_key = by_name_key(name);
-        if let Some(id_bytes) = self.attrs.get(&by_name_key)? {
+        if let Some(id_bytes) = self.snapshot.get(&self.attrs, by_name_key)? {
             Ok(Some(AttributeId::try_from(id_bytes.as_ref())?))
         } else {
             Ok(None)
@@ -258,6 +257,14 @@ impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let db = Database::builder(path).open()?;
         let meta = db.keyspace("meta", KeyspaceCreateOptions::default)?;
+        if let Some(version) = meta.get(META_FORMAT_VERSION)? {
+            let version = u64::from_be_bytes(version.as_ref().try_into()?);
+            if version != FORMAT_VERSION {
+                return Err(Error::UnsupportedFormatVersion(version));
+            }
+        } else {
+            meta.insert(META_FORMAT_VERSION, FORMAT_VERSION.to_be_bytes())?;
+        }
         let attrs = db.keyspace("attrs", KeyspaceCreateOptions::default)?;
         let easvt = db.keyspace("easvt", KeyspaceCreateOptions::default)?;
         let aesvt = db.keyspace("aesvt", KeyspaceCreateOptions::default)?;
@@ -363,7 +370,7 @@ impl Store {
         let attribute_id = if let Some(id_bytes) = self.attrs.get(&by_name_key)? {
             let id = AttributeId::new(u16::from_be_bytes(id_bytes[..2].try_into().unwrap()));
             let existing = self.attribute_def(id)?;
-            if existing.value_type != def.value_type {
+            if existing != def {
                 return Err(Error::SchemaConflict(def.name));
             }
             id
@@ -468,6 +475,52 @@ mod tests {
         }
     }
 
+    fn format_version(store: &Store) -> u64 {
+        u64::from_be_bytes(
+            store
+                .meta
+                .get(META_FORMAT_VERSION)
+                .unwrap()
+                .unwrap()
+                .as_ref()
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn open_stamps_missing_format_version() {
+        let dir = TempDir::new().unwrap();
+        {
+            let db = Database::builder(dir.path()).open().unwrap();
+            db.keyspace("meta", KeyspaceCreateOptions::default).unwrap();
+        }
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(format_version(&store), FORMAT_VERSION);
+    }
+
+    #[test]
+    fn reopen_preserves_format_version() {
+        let (dir, store) = temp_store();
+        assert_eq!(format_version(&store), FORMAT_VERSION);
+        drop(store);
+        let reopened = Store::open(dir.path()).unwrap();
+        assert_eq!(format_version(&reopened), FORMAT_VERSION);
+    }
+
+    #[test]
+    fn open_rejects_unsupported_format_version() {
+        let dir = TempDir::new().unwrap();
+        {
+            let db = Database::builder(dir.path()).open().unwrap();
+            let meta = db.keyspace("meta", KeyspaceCreateOptions::default).unwrap();
+            meta.insert(META_FORMAT_VERSION, 2_u64.to_be_bytes())
+                .unwrap();
+        }
+        let result = Store::open(dir.path());
+        assert!(matches!(result, Err(Error::UnsupportedFormatVersion(2))));
+    }
+
     #[test]
     fn declare_and_reload_def() {
         let (_dir, store) = temp_store();
@@ -478,6 +531,30 @@ mod tests {
         assert_eq!(def.name, "person/name");
         assert_eq!(def.value_type, Type::String);
         assert!(!def.indexed);
+    }
+
+    #[test]
+    fn named_attribute_def_uses_one_snapshot() {
+        let (_dir, store) = temp_store();
+        let historical = store.db();
+        let schema = AttributeDef {
+            indexed: true,
+            ..def("person/name", Type::String, CollectionKind::One)
+        };
+
+        assert_eq!(historical.named_attribute_def(&schema.name).unwrap(), None);
+
+        let id = store.declare_attribute(schema.clone()).unwrap();
+
+        assert_eq!(historical.attribute_id(&schema.name).unwrap(), None);
+        assert_eq!(historical.named_attribute_def(&schema.name).unwrap(), None);
+
+        let current = store.db();
+        assert_eq!(current.attribute_id(&schema.name).unwrap(), Some(id));
+        assert_eq!(
+            current.named_attribute_def(&schema.name).unwrap(),
+            Some(schema)
+        );
     }
 
     #[test]
@@ -499,6 +576,19 @@ mod tests {
             .declare_attribute(def("person/name", Type::String, CollectionKind::One))
             .unwrap();
         let result = store.declare_attribute(def("person/name", Type::Long, CollectionKind::One));
+        assert!(matches!(result, Err(Error::SchemaConflict(_))));
+    }
+
+    #[test]
+    fn declare_conflicting_non_value_type_errors() {
+        let (_dir, store) = temp_store();
+        store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let result = store.declare_attribute(AttributeDef {
+            indexed: true,
+            ..def("person/name", Type::String, CollectionKind::One)
+        });
         assert!(matches!(result, Err(Error::SchemaConflict(_))));
     }
 

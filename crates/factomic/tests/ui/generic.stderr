@@ -1,0 +1,5 @@
+error: generic entities are not supported
+ --> tests/ui/generic.rs:2:13
+  |
+2 | struct Model<T> {
+  |             ^^^

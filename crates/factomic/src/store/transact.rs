@@ -681,6 +681,15 @@ mod tests {
             reverted,
             Op::Retract
         )));
+        assert_eq!(
+            store
+                .db()
+                .entity_factoms(txn1.entity_id())
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -721,27 +730,6 @@ mod tests {
             .unwrap();
         assert_eq!(current.len(), 1);
         assert_eq!(current[0].value(), &Value::String("alice".into()));
-    }
-
-    #[test]
-    fn revert_keeps_tx_timestamp() {
-        let (_dir, store) = temp_store();
-        let name = store
-            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
-            .unwrap();
-        let e = store.new_entity().unwrap();
-        let txn1 = store.assert(e, name, &"alice").unwrap().unwrap();
-
-        store.revert_txn(txn1).unwrap();
-        assert_eq!(
-            store
-                .db()
-                .entity_factoms(txn1.entity_id())
-                .collect::<Result<Vec<_>>>()
-                .unwrap()
-                .len(),
-            1
-        );
     }
 
     #[test]
@@ -910,42 +898,6 @@ mod tests {
                 .len(),
             1
         );
-    }
-
-    #[test]
-    fn map_keys_hold_one_value_each() {
-        let (_dir, store) = temp_store();
-        let scores = store
-            .declare_attribute(AttributeDef {
-                key_type: Some(Type::String),
-                ..def("person/scores", Type::Long, CollectionKind::Map)
-            })
-            .unwrap();
-        let e = store.new_entity().unwrap();
-        let ka = Slot::Key(MapKey::String("a".into()));
-        let kb = Slot::Key(MapKey::String("b".into()));
-        store
-            .assert_at(e, scores, ka.clone(), &1i64)
-            .unwrap()
-            .unwrap();
-        store
-            .assert_at(e, scores, kb.clone(), &2i64)
-            .unwrap()
-            .unwrap();
-        store
-            .assert_at(e, scores, ka.clone(), &3i64)
-            .unwrap()
-            .unwrap();
-        let factoms = store
-            .db()
-            .entity_factoms(e)
-            .collect::<Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(factoms.len(), 2);
-        assert_eq!(factoms[0].slot(), &ka);
-        assert_eq!(factoms[0].value(), &Value::Long(3));
-        assert_eq!(factoms[1].slot(), &kb);
-        assert_eq!(factoms[1].value(), &Value::Long(2));
     }
 
     #[test]

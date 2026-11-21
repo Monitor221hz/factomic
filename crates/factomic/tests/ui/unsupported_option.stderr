@@ -1,0 +1,5 @@
+error: optional collections are only supported as map values
+ --> tests/ui/unsupported_option.rs:3:12
+  |
+3 |     value: Option<Vec<String>>,
+  |            ^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: nested optional collections are not supported
+ --> tests/ui/nested_map_option.rs:5:29
+  |
+5 |     values: HashMap<String, Option<Vec<String>>>,
+  |                             ^^^^^^^^^^^^^^^^^^^

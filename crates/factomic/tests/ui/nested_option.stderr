@@ -1,0 +1,5 @@
+error: nested Option fields are not supported
+ --> tests/ui/nested_option.rs:3:12
+  |
+3 |     value: Option<Option<String>>,
+  |            ^^^^^^^^^^^^^^^^^^^^^^

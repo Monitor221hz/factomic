@@ -1,0 +1,5 @@
+error: #[factomic(value)] and #[factomic(ref)] cannot be combined
+ --> tests/ui/value_ref_conflict.rs:4:5
+  |
+4 |     value: String,
+  |     ^^^^^

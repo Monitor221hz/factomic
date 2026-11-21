@@ -1,0 +1,5 @@
+error: map keys must be String, i64, EntityId, Arc<T>, or an entity type
+ --> tests/ui/invalid_map_key.rs:5:21
+  |
+5 |     values: HashMap<bool, String>,
+  |                     ^^^^

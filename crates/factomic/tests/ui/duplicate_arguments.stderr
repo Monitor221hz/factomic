@@ -1,0 +1,23 @@
+error: duplicate namespace attribute
+ --> tests/ui/duplicate_arguments.rs:3:12
+  |
+3 | #[factomic(namespace = "second")]
+  |            ^^^^^^^^^
+
+error: duplicate name attribute
+ --> tests/ui/duplicate_arguments.rs:6:16
+  |
+6 |     #[factomic(name = "shared/other")]
+  |                ^^^^
+
+error: duplicate indexed attribute
+ --> tests/ui/duplicate_arguments.rs:8:16
+  |
+8 |     #[factomic(indexed)]
+  |                ^^^^^^^
+
+error: duplicate component attribute
+  --> tests/ui/duplicate_arguments.rs:10:16
+   |
+10 |     #[factomic(component)]
+   |                ^^^^^^^^^

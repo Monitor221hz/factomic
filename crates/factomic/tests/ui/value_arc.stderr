@@ -1,0 +1,5 @@
+error: #[factomic(value)] cannot be applied to Arc references
+ --> tests/ui/value_arc.rs:6:12
+  |
+6 |     value: Arc<String>,
+  |            ^^^^^^^^^^^

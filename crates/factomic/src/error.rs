@@ -8,6 +8,9 @@ pub enum Error {
     #[error("unknown attribute: {0}")]
     UnknownAttribute(String),
 
+    #[error("attribute is not indexed: {0}")]
+    AttributeNotIndexed(String),
+
     #[error("type mismatch on {attribute}: expected {expected:?}, got {got:?}")]
     TypeMismatch {
         attribute: String,
@@ -15,8 +18,11 @@ pub enum Error {
         got: Type,
     },
 
-    #[error("attribute {0} already exists with a different value type")]
+    #[error("attribute {0} already exists with a different definition")]
     SchemaConflict(String),
+
+    #[error("unsupported storage format version: {0}")]
+    UnsupportedFormatVersion(u64),
 
     #[error("value type mismatch: expected {expected:?}, got {got:?}")]
     ValueTypeMismatch { expected: Type, got: Type },
