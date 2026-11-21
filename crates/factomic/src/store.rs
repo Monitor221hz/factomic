@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use arc_swap::ArcSwap;
-use fjall::{Database, Keyspace, KeyspaceCreateOptions, Readable};
+use fjall::{Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode, Readable};
 use parking_lot::Mutex;
 
 use crate::error::{Error, Result};
@@ -254,6 +254,16 @@ impl Store {
         self.swap(self.current.load().txn);
     }
 
+    pub(crate) fn durable_batch(&self, capacity: usize) -> OwnedWriteBatch {
+        OwnedWriteBatch::with_capacity(self.db.clone(), capacity)
+            .durability(Some(PersistMode::SyncAll))
+    }
+
+    pub(crate) fn persist_durable(&self) -> Result<()> {
+        self.db.persist(PersistMode::SyncAll)?;
+        Ok(())
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let db = Database::builder(path).open()?;
         let meta = db.keyspace("meta", KeyspaceCreateOptions::default)?;
@@ -307,6 +317,7 @@ impl Store {
             transact_lock: Mutex::new(()),
         };
         store.sync_system_attributes()?;
+        store.persist_durable()?;
         Ok(store)
     }
 
@@ -389,6 +400,7 @@ impl Store {
             .insert(&by_name_key, attribute_id.to_be_bytes())?;
         let by_id_key = by_attr_key(attribute_id);
         self.attrs.insert(by_id_key, by_attr_value(&def))?;
+        self.persist_durable()?;
         self.refresh();
         Ok(attribute_id)
     }
@@ -448,7 +460,9 @@ impl Store {
     pub fn new_entity(&self) -> Result<EntityId> {
         let _guard = self.transact_lock.lock();
         self.refresh();
-        self.alloc_entity_id(USER_PARTITION)
+        let id = self.alloc_entity_id(USER_PARTITION)?;
+        self.persist_durable()?;
+        Ok(id)
     }
 }
 

@@ -20,6 +20,7 @@ use crate::{
 use super::{FactomRef, check_key, check_type, ref_target};
 
 const EA_KEY_OFFSET: usize = size_of::<EntityId>() + size_of::<AttributeId>();
+const INITIAL_TXN_BATCH_CAPACITY: usize = 24;
 
 enum InsertPosition {
     Before(Slot),
@@ -543,7 +544,7 @@ impl<'a> Transaction<'a> {
         }
 
         let txn = store.alloc_txn_id()?;
-        let mut batch = OwnedWriteBatch::with_capacity(store.db.clone(), 24);
+        let mut batch = store.durable_batch(INITIAL_TXN_BATCH_CAPACITY);
 
         for attribute_changes in changes.values() {
             write_attribute_changes(store, &mut batch, txn, attribute_changes)?;
