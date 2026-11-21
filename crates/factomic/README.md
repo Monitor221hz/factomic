@@ -1,4 +1,23 @@
-# factomic
+<p align="center">
+  <img src="/logo.png" height="200">
+</p>
+<p align="center">
+  <small>logo by <a href="https://lorcblog.blogspot.com/">Lorc</a> under <a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>, modified.</small>
+</p>
+<p align="center">
+  <a href="https://github.com/Monitor221hz/factomic/actions/workflows/ci.yml">
+    <img src="https://github.com/Monitor221hz/factomic/actions/workflows/ci.yml/badge.svg" alt="CI" />
+  </a>
+  <a href="https://docs.rs/factomic">
+    <img src="https://img.shields.io/docsrs/factomic?color=green" alt="docs.rs" />
+  </a>
+  <a href="https://crates.io/crates/factomic">
+    <img src="https://img.shields.io/crates/v/factomic?color=blue" alt="Crates.io" />
+  </a>
+  <a href="https://deps.rs/repo/github/Monitor221hz/factomic">
+    <img src="https://deps.rs/repo/github/Monitor221hz/factomic/status.svg" alt="dependency status" />
+  </a>
+</p>
 
 Factomic is a unitemporal, embedded fact database backed by [fjall](https://crates.io/crates/fjall) born out of a need for a Datomic-like model and all its audit-trail advantages, while fully supporting ordered list and map operations.
 
