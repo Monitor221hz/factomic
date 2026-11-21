@@ -116,3 +116,7 @@ Comparisons use fjall `SyncAll`, redb `Immediate`, SQLite WAL with `synchronous=
 cargo test --workspace --all-features
 cargo run -p factomic-example
 ```
+
+## CI and publishing
+
+Configure the `CARGO_REGISTRY_TOKEN` repository secret with a crates.io API token.

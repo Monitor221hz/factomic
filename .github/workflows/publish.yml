@@ -29,9 +29,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
-      - run: cargo publish --dry-run -p factomic-derive
-      - run: cargo publish --dry-run -p factomic
+      - run: cargo publish --dry-run --workspace
       - if: github.event.inputs.dry_run != 'true'
-        run: cargo publish -p factomic-derive --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
-      - if: github.event.inputs.dry_run != 'true'
-        run: cargo publish -p factomic --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
+        run: cargo publish --workspace --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"

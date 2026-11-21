@@ -123,6 +123,10 @@ Run `cargo bench -p factomic --bench compare` for strict-durability comparisons.
 
 Comparisons use fjall `SyncAll`, redb `Immediate`, SQLite WAL with `synchronous=FULL`, and normal durable LMDB commits.
 
+## CI and publishing
+
+Configure the `CARGO_REGISTRY_TOKEN` repository secret with a crates.io API token.
+
 ## License
 
 Apache-2.0. See `LICENSE`.
