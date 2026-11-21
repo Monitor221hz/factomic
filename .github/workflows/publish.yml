@@ -28,6 +28,33 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Validate tag against Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --format-version 1 --no-deps |
+            jq -e --arg tag "${GITHUB_REF_NAME#v}" '
+              def check($name):
+                . as $root |
+                $root.packages[] |
+                select(.name == $name) |
+                if .version != $tag then
+                  error("\($name) version \(.version) does not match tag \($tag)")
+                else
+                  true
+                end;
+              (check("factomic") and check("factomic-derive")) and
+              (.packages[] |
+                select(.name == "factomic") |
+                .dependencies[] |
+                select(.name == "factomic-derive") |
+                if .req != ("^" + $tag) then
+                  error("factomic-derive requirement \(.req) does not match tag \($tag)")
+                else
+                  true
+                end)
+            '
       - run: cargo test --workspace --all-features
       - run: cargo publish --dry-run --workspace
       - if: github.event.inputs.dry_run != 'true'
