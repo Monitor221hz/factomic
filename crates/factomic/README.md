@@ -61,9 +61,9 @@ cargo run -p factomic-example
 
 ## Benchmarking
 
-Run the Criterion benchmarks with `cargo bench -p factomic`, or compile them without running using `cargo bench -p factomic --no-run`. Benchmarks use real temporary storage and normal `SyncAll` durability, so write latency depends heavily on the filesystem and hardware.
+Run the Criterion benchmarks with `cargo bench -p factomic`, or compile them without running using `cargo bench -p factomic --no-run`.
 
-Reports are written to `target/criterion/report/index.html`. Criterion 0.8 and Rust 1.90 are used.
+Reports are written to `target/criterion/report/index.html`. 
 
 Save and compare baselines with:
 
@@ -74,9 +74,18 @@ cargo bench -p factomic -- --baseline main
 
 ### Latest measured results
 
-Measured on an AMD Ryzen 7 9800X3D with 16 threads, approximately 94 GiB RAM, Windows 11 Home 26200, and a Samsung SSD 990 PRO 1TB. Versions: Factomic 0.2.0, fjall 3.1.13, redb 5.0.0, rusqlite 0.43.0, heed 0.23.1, Criterion 0.8.2, and rustc 1.99.1. 
+Specs: AMD Ryzen 7 9800X3D, 94 GiB RAM, Windows 11 Home 26200, Samsung SSD 990 PRO 1TB. 
+
+Versions: 
+- Factomic 0.2.0
+- fjall 3.1.13
+- redb 5.0.0, 
+- rusqlite 0.43.0
+- heed 0.23.1
 
 All writes used strict durability.
+
+#### Comparison
 
 | Benchmark | Factomic | fjall | redb | rusqlite | heed |
 |---|---:|---:|---:|---:|---:|
@@ -110,7 +119,9 @@ Practical Factomic workloads:
 
 ## Database comparisons
 
-Run `cargo bench -p factomic --bench compare` for strict-durability comparisons with fjall 3.1.13, redb 5.0.0, rusqlite 0.43.0, and heed 0.23.1. Comparisons use fjall `SyncAll`, redb `Immediate`, SQLite WAL with `synchronous=FULL`, and normal durable LMDB commits.
+Run `cargo bench -p factomic --bench compare` for strict-durability comparisons.
+
+Comparisons use fjall `SyncAll`, redb `Immediate`, SQLite WAL with `synchronous=FULL`, and normal durable LMDB commits.
 
 ## License
 
