@@ -95,7 +95,7 @@ All writes used strict durability.
 | `range_read_100` | 21.92 µs | 10.52 µs | 8.35 µs | 8.78 µs | 5.02 µs |
 | `commit_100` throughput | 57.3K records/s | 72.7K records/s | 74.1K records/s | 66.8K records/s | 376.4K records/s |
 
-Practical Factomic workloads:
+#### Workloads
 
 | Operation | Result |
 |---|---:|
