@@ -18,7 +18,46 @@ use crate::value::{Type, tag_for_type, type_for_tag};
 mod query;
 mod transact;
 
+#[cfg(test)]
+mod test_invariants;
+
 pub use transact::Transaction;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommitFailure {
+    BeforeCommit,
+    AfterCommit,
+}
+
+#[cfg(test)]
+thread_local! {
+    static NEXT_COMMIT_FAILURE: std::cell::Cell<Option<CommitFailure>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_commit(failure: CommitFailure) {
+    NEXT_COMMIT_FAILURE.with(|next| next.set(Some(failure)));
+}
+
+#[cfg(test)]
+fn take_commit_failure(expected: CommitFailure) -> bool {
+    NEXT_COMMIT_FAILURE.with(|next| {
+        if next.get() == Some(expected) {
+            next.set(None);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+#[cfg(test)]
+fn injected_commit_error() -> Error {
+    Error::Storage(fjall::Error::Io(std::io::Error::other(
+        "injected commit failure",
+    )))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttributeDef {
@@ -287,6 +326,19 @@ impl Store {
             .durability(Some(PersistMode::SyncAll))
     }
 
+    pub(crate) fn commit_durable(&self, batch: OwnedWriteBatch) -> Result<()> {
+        #[cfg(test)]
+        if take_commit_failure(CommitFailure::BeforeCommit) {
+            return Err(injected_commit_error());
+        }
+        batch.commit()?;
+        #[cfg(test)]
+        if take_commit_failure(CommitFailure::AfterCommit) {
+            return Err(injected_commit_error());
+        }
+        Ok(())
+    }
+
     pub(crate) fn persist_durable(&self) -> Result<()> {
         self.db.persist(PersistMode::SyncAll)?;
         Ok(())
@@ -414,7 +466,7 @@ impl Store {
                 );
             }
         }
-        batch.commit()?;
+        self.commit_durable(batch)?;
         self.refresh();
         Ok(())
     }
@@ -496,7 +548,7 @@ impl Store {
         if let Some(txn) = declaration_txn {
             self.record_tx_timestamp(&mut batch, txn);
         }
-        batch.commit()?;
+        self.commit_durable(batch)?;
         if let Some(txn) = declaration_txn {
             self.swap(txn);
         } else {
@@ -610,6 +662,32 @@ mod tests {
     }
 
     #[test]
+    fn second_live_store_on_same_path_is_rejected() {
+        let (dir, store) = temp_store();
+        assert!(matches!(
+            Store::open(dir.path()),
+            Err(Error::Storage(fjall::Error::Locked))
+        ));
+        drop(store);
+        let reopened = Store::open(dir.path()).unwrap();
+        reopened.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn db_handles_keep_path_locked_until_dropped() {
+        let (dir, store) = temp_store();
+        let db = store.db();
+        drop(store);
+        assert!(matches!(
+            Store::open(dir.path()),
+            Err(Error::Storage(fjall::Error::Locked))
+        ));
+        drop(db);
+        let reopened = Store::open(dir.path()).unwrap();
+        reopened.check_invariants().unwrap();
+    }
+
+    #[test]
     fn declare_and_reload_def() {
         let (_dir, store) = temp_store();
         let id = store
@@ -711,6 +789,9 @@ mod tests {
             ])
             .unwrap();
         assert_eq!(store.db().txn(), declaration);
+        assert_eq!(store.revert_txn(declaration).unwrap(), None);
+        assert_eq!(store.db().txn(), declaration);
+        assert_eq!(store.db().attribute_id("person/name").unwrap(), Some(name));
     }
 
     #[test]
@@ -951,6 +1032,66 @@ mod tests {
         let again = reopened.declare_attribute(schema).unwrap();
         assert_eq!(id, again);
         assert!(reopened.attribute_def(id).unwrap().indexed);
+    }
+
+    #[test]
+    fn mixed_lifecycles_satisfy_invariants_and_reopen() {
+        let (dir, store) = temp_store();
+        let [name, age, friend, items, scores] = store
+            .declare_attributes([
+                def("person/name", Type::String, CollectionKind::One),
+                AttributeDef {
+                    indexed: true,
+                    ..def("person/age", Type::Long, CollectionKind::One)
+                },
+                def("person/friend", Type::Ref, CollectionKind::One),
+                def("person/items", Type::String, CollectionKind::List),
+                AttributeDef {
+                    key_type: Some(Type::String),
+                    ..def("person/scores", Type::Long, CollectionKind::Map)
+                },
+            ])
+            .unwrap();
+        let entity = store.new_entity().unwrap();
+        let other = store.new_entity().unwrap();
+        let replacement = store.new_entity().unwrap();
+        store
+            .transact()
+            .assert(entity, name, &"alice")
+            .assert(entity, age, &30_i64)
+            .assert(entity, friend, &other)
+            .put(entity, scores, "math".into(), &90_i64)
+            .push(entity, items, &"a")
+            .push(entity, items, &"c")
+            .commit()
+            .unwrap();
+        store.check_invariants().unwrap();
+
+        let anchor = store.db().slot_at(entity, items, 1).unwrap().unwrap();
+        store
+            .transact()
+            .assert(entity, name, &"bob")
+            .assert(entity, age, &31_i64)
+            .assert(entity, friend, &replacement)
+            .put(entity, scores, "math".into(), &95_i64)
+            .insert_before(entity, items, anchor, &"b")
+            .commit()
+            .unwrap();
+        store.check_invariants().unwrap();
+
+        store.rebalance(entity, items).unwrap();
+        store.check_invariants().unwrap();
+        store.retract(entity, friend, &replacement).unwrap();
+        store.check_invariants().unwrap();
+        store.assert(entity, friend, &other).unwrap();
+        store.check_invariants().unwrap();
+        let reverted = store.assert(entity, age, &40_i64).unwrap().unwrap();
+        store.revert_txn(reverted).unwrap();
+        store.check_invariants().unwrap();
+
+        drop(store);
+        let reopened = Store::open(dir.path()).unwrap();
+        reopened.check_invariants().unwrap();
     }
 
     #[test]

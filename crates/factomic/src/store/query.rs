@@ -743,6 +743,145 @@ mod tests {
     }
 
     #[test]
+    fn reopen_preserves_indexes_history_and_time_views() {
+        let (dir, store) = temp_store();
+        let entity = store.new_entity().unwrap();
+        let first_target = store.new_entity().unwrap();
+        let second_target = store.new_entity().unwrap();
+        let [age, friend, items, scores] = store
+            .declare_attributes([
+                AttributeDef {
+                    indexed: true,
+                    ..def("person/age", Type::Long, CollectionKind::One)
+                },
+                def("person/friend", Type::Ref, CollectionKind::One),
+                def("person/items", Type::String, CollectionKind::List),
+                AttributeDef {
+                    key_type: Some(Type::String),
+                    ..def("person/scores", Type::Long, CollectionKind::Map)
+                },
+            ])
+            .unwrap();
+        let declaration = store.db().txn();
+        let t1 = store
+            .transact()
+            .assert(entity, age, &30_i64)
+            .assert(entity, friend, &first_target)
+            .push(entity, items, &"a")
+            .push(entity, items, &"c")
+            .put(entity, scores, "math".into(), &90_i64)
+            .commit()
+            .unwrap()
+            .unwrap();
+        let declaration_time = tx_time(&store.db(), declaration);
+        let t1_time = tx_time(&store.db(), t1);
+        std::thread::sleep(Duration::from_millis(2));
+        let anchor = store.db().slot_at(entity, items, 1).unwrap().unwrap();
+        let t2 = store
+            .transact()
+            .assert(entity, age, &31_i64)
+            .assert(entity, friend, &second_target)
+            .put(entity, scores, "math".into(), &95_i64)
+            .insert_before(entity, items, anchor, &"b")
+            .commit()
+            .unwrap()
+            .unwrap();
+        let t2_time = tx_time(&store.db(), t2);
+        drop(store);
+
+        let store = Store::open(dir.path()).unwrap();
+        let db = store.db();
+        assert_eq!(db.txn(), t2);
+        assert_eq!(
+            db.entity_values::<String>(entity, items)
+                .collect::<Result<Vec<_>>>()
+                .unwrap(),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+        assert_eq!(
+            db.entity_keyvalue::<i64>(entity, scores, "math").unwrap(),
+            Some(95)
+        );
+        assert_eq!(db.entity_value::<i64>(entity, age).unwrap(), Some(31));
+        assert_eq!(
+            db.referring_entities(second_target, friend).unwrap(),
+            vec![entity]
+        );
+        assert!(
+            db.referring_entities(first_target, friend)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(db.entities_with_value(age, &31_i64).unwrap(), vec![entity]);
+        assert!(db.entities_with_value(age, &30_i64).unwrap().is_empty());
+
+        let at_t1 = db.at(t1);
+        assert_eq!(
+            at_t1
+                .entity_values::<String>(entity, items)
+                .collect::<Result<Vec<_>>>()
+                .unwrap(),
+            vec!["a".to_string(), "c".to_string()]
+        );
+        assert_eq!(at_t1.entity_value::<i64>(entity, age).unwrap(), Some(30));
+        assert_eq!(
+            at_t1
+                .entity_keyvalue::<i64>(entity, scores, "math")
+                .unwrap(),
+            Some(90)
+        );
+        assert_eq!(
+            at_t1.entity_value::<EntityId>(entity, friend).unwrap(),
+            Some(first_target)
+        );
+        assert_eq!(
+            at_t1.entities_with_value(age, &30_i64).unwrap(),
+            vec![entity]
+        );
+        assert!(at_t1.entities_with_value(age, &31_i64).unwrap().is_empty());
+        assert!(at_t1.tx_factoms(t2).unwrap().is_empty());
+        assert!(
+            at_t1
+                .entity_history(entity)
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .iter()
+                .all(|factom| factom.txn() <= t1)
+        );
+
+        let log = db.tx_factoms(t2).unwrap();
+        for attr in [age, friend, items, scores] {
+            assert!(log.iter().any(|factom| factom.attribute() == attr));
+        }
+        assert_eq!(
+            db.at_time(t1_time)
+                .unwrap()
+                .unwrap()
+                .entity_value::<i64>(entity, age)
+                .unwrap(),
+            Some(30)
+        );
+        assert_eq!(
+            db.at_time(t2_time)
+                .unwrap()
+                .unwrap()
+                .entity_value::<i64>(entity, age)
+                .unwrap(),
+            Some(31)
+        );
+        assert!(
+            db.at_time(declaration_time)
+                .unwrap()
+                .unwrap()
+                .entity_factoms(entity)
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .is_empty()
+        );
+        store.check_invariants().unwrap();
+    }
+
+    #[test]
     fn txn_at_respects_timestamp_bounds() {
         let (_dir, store) = temp_store();
         let entity = store.new_entity().unwrap();

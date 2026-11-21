@@ -551,7 +551,7 @@ impl<'a> Transaction<'a> {
         }
 
         store.record_tx_timestamp(&mut batch, txn);
-        batch.commit()?;
+        store.commit_durable(batch)?;
         store.swap(txn);
         Ok(Some(txn))
     }
