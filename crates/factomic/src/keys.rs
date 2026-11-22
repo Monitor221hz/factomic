@@ -101,7 +101,7 @@ fn decode_identity(key: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// For entity scans by everything else.
-pub fn easvt_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8]) -> Vec<u8> {
+pub fn easv_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8]) -> Vec<u8> {
     let mut key = Vec::with_capacity(E_LEN + A_LEN + slot.encoded_len() + v.len());
     key.extend_from_slice(&e.to_be_bytes());
     key.extend_from_slice(&a.to_be_bytes());
@@ -111,7 +111,7 @@ pub fn easvt_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8]) -> Vec<u8> 
 }
 
 /// For attribute scans by entity; which attributes are contained in which entities.
-pub fn aesvt_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8]) -> Vec<u8> {
+pub fn aesv_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8]) -> Vec<u8> {
     let mut key = Vec::with_capacity(A_LEN + E_LEN + slot.encoded_len() + v.len());
     key.extend_from_slice(&a.to_be_bytes());
     key.extend_from_slice(&e.to_be_bytes());
@@ -121,7 +121,7 @@ pub fn aesvt_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8]) -> Vec<u8> 
 }
 
 /// For attribute scans by value; which attributes have a value, or are within a range of values (since v is still ordered). Usually opt-in by flag.
-pub fn avest_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8]) -> Vec<u8> {
+pub fn aves_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8]) -> Vec<u8> {
     let mut key = Vec::with_capacity(A_LEN + v.len() + E_LEN + slot.encoded_len());
     key.extend_from_slice(&a.to_be_bytes());
     key.extend_from_slice(v);
@@ -131,9 +131,9 @@ pub fn avest_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8]) -> Vec<u8> 
 }
 
 /// For value scans by attribute. This is only used for Ref values, which are entity ids, to find attributes/entities that reference a particular entity.
-pub fn vaest_key(target: EntityId, a: AttributeId, source: EntityId, slot: &Slot) -> Vec<u8> {
+pub fn vaes_key(value_ref: EntityId, a: AttributeId, source: EntityId, slot: &Slot) -> Vec<u8> {
     let mut key = Vec::with_capacity(E_LEN + A_LEN + E_LEN + slot.encoded_len());
-    key.extend_from_slice(&target.to_be_bytes());
+    key.extend_from_slice(&value_ref.to_be_bytes());
     key.extend_from_slice(&a.to_be_bytes());
     key.extend_from_slice(&source.to_be_bytes());
     slot.encode_key(&mut key);
@@ -141,38 +141,38 @@ pub fn vaest_key(target: EntityId, a: AttributeId, source: EntityId, slot: &Slot
 }
 
 /// Same as [easvt_key] but where t is encoded since [Op](crate::factom::Op) is stored as value instead in the key value pair.
-pub fn easvt_history_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8], t: TxnId) -> Vec<u8> {
-    let mut key = encode_history_identity(&easvt_key(e, a, slot, v));
+pub fn easvt_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8], t: TxnId) -> Vec<u8> {
+    let mut key = encode_history_identity(&easv_key(e, a, slot, v));
     key.reserve_exact(T_LEN);
     key.extend_from_slice(&t.to_be_bytes());
     key
 }
 
 /// Same as [aesvt_key] but where t is encoded since [Op](crate::factom::Op) is stored as value instead in the key value pair.
-pub fn aesvt_history_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8], t: TxnId) -> Vec<u8> {
-    let mut key = encode_history_identity(&aesvt_key(e, a, slot, v));
+pub fn aesvt_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8], t: TxnId) -> Vec<u8> {
+    let mut key = encode_history_identity(&aesv_key(e, a, slot, v));
     key.reserve_exact(T_LEN);
     key.extend_from_slice(&t.to_be_bytes());
     key
 }
 
 /// Same as [avest_key] but where t is encoded since [Op](crate::factom::Op) is stored as value instead in the key value pair.
-pub fn avest_history_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8], t: TxnId) -> Vec<u8> {
-    let mut key = encode_history_identity(&avest_key(e, a, slot, v));
+pub fn avest_key(e: EntityId, a: AttributeId, slot: &Slot, v: &[u8], t: TxnId) -> Vec<u8> {
+    let mut key = encode_history_identity(&aves_key(e, a, slot, v));
     key.reserve_exact(T_LEN);
     key.extend_from_slice(&t.to_be_bytes());
     key
 }
 
 /// Same as [vaest_key] but where t is encoded since [Op](crate::factom::Op) is stored as value instead in the key value pair.
-pub fn vaest_history_key(
+pub fn vaest_key(
     target: EntityId,
     a: AttributeId,
     source: EntityId,
     slot: &Slot,
     t: TxnId,
 ) -> Vec<u8> {
-    let mut key = encode_history_identity(&vaest_key(target, a, source, slot));
+    let mut key = encode_history_identity(&vaes_key(target, a, source, slot));
     key.reserve_exact(T_LEN);
     key.extend_from_slice(&t.to_be_bytes());
     key
@@ -193,21 +193,41 @@ fn corrupt(expected: usize, got: usize) -> Error {
     Error::CorruptKey { expected, got }
 }
 
-fn decode_easvt_key_raw(key: &[u8]) -> Result<(EntityId, AttributeId, Slot, Value)> {
+fn decode_easv_key_raw(key: &[u8]) -> Result<(EntityId, AttributeId, Slot, Value)> {
     let lim = E_LEN + A_LEN + 2;
     if key.len() < lim {
         return Err(corrupt(lim, key.len()));
     }
     let (s, consumed) = Slot::decode_key(&key[E_LEN + A_LEN..])?;
     Ok((
-        EntityId::with_value(u64::from_be_bytes(key[0..8].try_into().unwrap())),
-        AttributeId::new(u16::from_be_bytes(key[8..10].try_into().unwrap())),
+        EntityId::with_value(u64::from_be_bytes(key[0..E_LEN].try_into().unwrap())),
+        AttributeId::new(u16::from_be_bytes(
+            key[E_LEN..(E_LEN + A_LEN)].try_into().unwrap(),
+        )),
         s,
         Value::decode_key(&key[E_LEN + A_LEN + consumed..])?,
     ))
 }
 
-fn decode_aesvt_key_raw(key: &[u8]) -> Result<(AttributeId, EntityId, Slot, Value)> {
+fn decode_v_easv_key_raw(key: &[u8]) -> Result<Value> {
+    let lim = E_LEN + A_LEN + 2;
+    if key.len() < lim {
+        return Err(corrupt(lim, key.len()));
+    }
+    let consumed = Slot::len_key(&key[E_LEN + A_LEN..])?;
+    Value::decode_key(&key[E_LEN + A_LEN + consumed..])
+}
+
+fn decode_sv_easv_key_raw(key: &[u8]) -> Result<(Slot, Value)> {
+    let lim = E_LEN + A_LEN + 2;
+    if key.len() < lim {
+        return Err(corrupt(lim, key.len()));
+    }
+    let (slot, consumed) = Slot::decode_key(&key[E_LEN + A_LEN..])?;
+    Ok((slot, Value::decode_key(&key[E_LEN + A_LEN + consumed..])?))
+}
+
+fn decode_aesv_key_raw(key: &[u8]) -> Result<(AttributeId, EntityId, Slot, Value)> {
     let lim = A_LEN + E_LEN + 2;
     if key.len() < lim {
         return Err(corrupt(lim, key.len()));
@@ -221,7 +241,7 @@ fn decode_aesvt_key_raw(key: &[u8]) -> Result<(AttributeId, EntityId, Slot, Valu
     ))
 }
 
-fn decode_avest_key_raw(key: &[u8]) -> Result<(AttributeId, Value, EntityId, Slot)> {
+fn decode_aves_key_raw(key: &[u8]) -> Result<(AttributeId, Value, EntityId, Slot)> {
     let lim = A_LEN + 1 + E_LEN + 1;
     if key.len() < lim {
         return Err(corrupt(lim, key.len()));
@@ -238,7 +258,7 @@ fn decode_avest_key_raw(key: &[u8]) -> Result<(AttributeId, Value, EntityId, Slo
     ))
 }
 
-fn decode_vaest_key_raw(key: &[u8]) -> Result<(EntityId, AttributeId, EntityId, Slot)> {
+fn decode_vaes_key_raw(key: &[u8]) -> Result<(EntityId, AttributeId, EntityId, Slot)> {
     let lim = E_LEN + A_LEN + E_LEN + 1;
     if key.len() < lim {
         return Err(corrupt(lim, key.len()));
@@ -256,21 +276,39 @@ fn decode_vaest_key_raw(key: &[u8]) -> Result<(EntityId, AttributeId, EntityId, 
     ))
 }
 
-pub fn decode_easvt_key(key: &[u8]) -> Result<(EntityId, AttributeId, Slot, Value)> {
-    decode_easvt_key_raw(key)
+pub fn decode_easv_key(key: &[u8]) -> Result<(EntityId, AttributeId, Slot, Value)> {
+    decode_easv_key_raw(key)
+}
+
+pub fn decode_v_easv_key(key: &[u8]) -> Result<Value> {
+    decode_v_easv_key_raw(key)
+}
+
+pub fn decode_sv_easv_key(key: &[u8]) -> Result<(Slot, Value)> {
+    decode_sv_easv_key_raw(key)
 }
 
 #[allow(dead_code)]
-pub fn decode_aesvt_key(key: &[u8]) -> Result<(AttributeId, EntityId, Slot, Value)> {
-    decode_aesvt_key_raw(key)
+pub fn decode_v_aesv_key(key: &[u8]) -> Result<Value> {
+    decode_v_easv_key_raw(key)
 }
 
-pub fn decode_avest_key(key: &[u8]) -> Result<(AttributeId, Value, EntityId, Slot)> {
-    decode_avest_key_raw(key)
+#[allow(dead_code)]
+pub fn decode_sv_aesv_key(key: &[u8]) -> Result<(Slot, Value)> {
+    decode_sv_easv_key_raw(key)
 }
 
-pub fn decode_vaest_key(key: &[u8]) -> Result<(EntityId, AttributeId, EntityId, Slot)> {
-    decode_vaest_key_raw(key)
+#[allow(dead_code)]
+pub fn decode_aesv_key(key: &[u8]) -> Result<(AttributeId, EntityId, Slot, Value)> {
+    decode_aesv_key_raw(key)
+}
+
+pub fn decode_aves_key(key: &[u8]) -> Result<(AttributeId, Value, EntityId, Slot)> {
+    decode_aves_key_raw(key)
+}
+
+pub fn decode_vaes_key(key: &[u8]) -> Result<(EntityId, AttributeId, EntityId, Slot)> {
+    decode_vaes_key_raw(key)
 }
 
 fn decode_history_identity(key: &[u8]) -> Result<(Vec<u8>, TxnId)> {
@@ -283,32 +321,48 @@ fn decode_history_identity(key: &[u8]) -> Result<(Vec<u8>, TxnId)> {
     Ok((identity, txn))
 }
 
-pub fn decode_easvt_history_key(key: &[u8]) -> Result<(EntityId, AttributeId, Slot, Value, TxnId)> {
+pub fn decode_v_easvt_key(key: &[u8]) -> Result<Value> {
+    if key.len() < T_LEN + 2 {
+        return Err(corrupt(T_LEN + 2, key.len()));
+    }
+    let txn_start = key.len() - T_LEN;
+    let identity = decode_identity(&key[..txn_start])?;
+    decode_v_easv_key_raw(&identity)
+}
+
+pub fn decode_sv_easvt_key(key: &[u8]) -> Result<(Slot, Value)> {
+    if key.len() < T_LEN + 2 {
+        return Err(corrupt(T_LEN + 2, key.len()));
+    }
+    let txn_start = key.len() - T_LEN;
+    let identity = decode_identity(&key[..txn_start])?;
+    decode_sv_easv_key_raw(&identity)
+}
+
+pub fn decode_easvt_key(key: &[u8]) -> Result<(EntityId, AttributeId, Slot, Value, TxnId)> {
     let (identity, txn) = decode_history_identity(key)?;
-    let (e, a, s, v) = decode_easvt_key_raw(&identity)?;
+    let (e, a, s, v) = decode_easv_key_raw(&identity)?;
     Ok((e, a, s, v, txn))
 }
 
 #[allow(dead_code)]
-pub fn decode_aesvt_history_key(key: &[u8]) -> Result<(AttributeId, EntityId, Slot, Value, TxnId)> {
+pub fn decode_aesvt_key(key: &[u8]) -> Result<(AttributeId, EntityId, Slot, Value, TxnId)> {
     let (identity, txn) = decode_history_identity(key)?;
-    let (a, e, s, v) = decode_aesvt_key_raw(&identity)?;
+    let (a, e, s, v) = decode_aesv_key_raw(&identity)?;
     Ok((a, e, s, v, txn))
 }
 
 #[allow(dead_code)]
-pub fn decode_avest_history_key(key: &[u8]) -> Result<(AttributeId, Value, EntityId, Slot, TxnId)> {
+pub fn decode_avest_key(key: &[u8]) -> Result<(AttributeId, Value, EntityId, Slot, TxnId)> {
     let (identity, txn) = decode_history_identity(key)?;
-    let (a, v, e, s) = decode_avest_key_raw(&identity)?;
+    let (a, v, e, s) = decode_aves_key_raw(&identity)?;
     Ok((a, v, e, s, txn))
 }
 
 #[allow(dead_code)]
-pub fn decode_vaest_history_key(
-    key: &[u8],
-) -> Result<(EntityId, AttributeId, EntityId, Slot, TxnId)> {
+pub fn decode_vaest_key(key: &[u8]) -> Result<(EntityId, AttributeId, EntityId, Slot, TxnId)> {
     let (identity, txn) = decode_history_identity(key)?;
-    let (v, a, e, s) = decode_vaest_key_raw(&identity)?;
+    let (v, a, e, s) = decode_vaes_key_raw(&identity)?;
     Ok((v, a, e, s, txn))
 }
 
@@ -327,30 +381,30 @@ pub fn decode_txlog_key(key: &[u8]) -> Result<(TxnId, EntityId, AttributeId, Slo
     ))
 }
 
-pub fn easvt_entity_prefix(e: EntityId) -> Vec<u8> {
+pub fn easv_entity_prefix(e: EntityId) -> Vec<u8> {
     e.to_be_bytes().to_vec()
 }
 
-pub fn easvt_entity_attr_prefix(e: EntityId, a: AttributeId) -> Vec<u8> {
-    let mut prefix = easvt_entity_prefix(e); // todo: prealloc
+pub fn easv_entity_attr_prefix(e: EntityId, a: AttributeId) -> Vec<u8> {
+    let mut prefix = easv_entity_prefix(e); // todo: prealloc
     prefix.extend_from_slice(&a.to_be_bytes());
     prefix
 }
 
-pub fn easvt_entity_attr_slot_prefix(e: EntityId, a: AttributeId, s: &Slot) -> Vec<u8> {
-    let mut prefix = easvt_entity_prefix(e); // todo: prealloc
+pub fn easv_entity_attr_slot_prefix(e: EntityId, a: AttributeId, s: &Slot) -> Vec<u8> {
+    let mut prefix = easv_entity_prefix(e); // todo: prealloc
     prefix.extend_from_slice(&a.to_be_bytes());
     s.encode_key(&mut prefix);
     prefix
 }
 
-pub fn easvt_entity_attr_slot_value_prefix(
+pub fn easv_entity_attr_slot_value_prefix(
     e: EntityId,
     a: AttributeId,
     s: &Slot,
     v: &[u8],
 ) -> Vec<u8> {
-    let mut prefix = easvt_entity_prefix(e); // todo: prealloc
+    let mut prefix = easv_entity_prefix(e); // todo: prealloc
     prefix.extend_from_slice(&a.to_be_bytes());
     s.encode_key(&mut prefix);
     prefix.extend_from_slice(v);
@@ -358,31 +412,31 @@ pub fn easvt_entity_attr_slot_value_prefix(
 }
 
 #[allow(dead_code)]
-pub fn aesvt_attr_prefix(a: AttributeId) -> Vec<u8> {
+pub fn aesv_attr_prefix(a: AttributeId) -> Vec<u8> {
     a.to_be_bytes().to_vec()
 }
 
-pub fn avest_attr_prefix(a: AttributeId) -> Vec<u8> {
+pub fn aves_attr_prefix(a: AttributeId) -> Vec<u8> {
     a.to_be_bytes().to_vec()
 }
 
-pub fn avest_value_prefix(a: AttributeId, v: &[u8]) -> Vec<u8> {
-    let mut prefix = avest_attr_prefix(a);
+pub fn avest_attr_value_prefix(a: AttributeId, v: &[u8]) -> Vec<u8> {
+    let mut prefix = aves_attr_prefix(a);
     prefix.extend_from_slice(v);
     prefix
 }
 
-pub fn vaest_target_prefix(target: EntityId) -> Vec<u8> {
-    target.to_be_bytes().to_vec()
+pub fn vaes_ref_prefix(value_ref: EntityId) -> Vec<u8> {
+    value_ref.to_be_bytes().to_vec()
 }
 
-pub fn vaest_target_attr_prefix(target: EntityId, a: AttributeId) -> Vec<u8> {
-    let mut prefix = vaest_target_prefix(target);
+pub fn vaes_ref_attr_prefix(target: EntityId, a: AttributeId) -> Vec<u8> {
+    let mut prefix = vaes_ref_prefix(target);
     prefix.extend_from_slice(&a.to_be_bytes());
     prefix
 }
 
-pub fn txlog_prefix(t: TxnId) -> Vec<u8> {
+pub fn txlog_txn_prefix(t: TxnId) -> Vec<u8> {
     t.to_be_bytes().to_vec()
 }
 
@@ -414,8 +468,8 @@ mod tests {
             position(),
             Value::String("alice".into()),
         );
-        let key = easvt_key(entity, attr, &k, &region(&value));
-        assert_eq!(decode_easvt_key(&key).unwrap(), (entity, attr, k, value));
+        let key = easv_key(entity, attr, &k, &region(&value));
+        assert_eq!(decode_easv_key(&key).unwrap(), (entity, attr, k, value));
     }
 
     #[test]
@@ -429,11 +483,11 @@ mod tests {
         slot.encode_key(&mut raw);
         raw.extend_from_slice(&region);
 
-        let current = easvt_key(entity, attr, &slot, &region);
+        let current = easv_key(entity, attr, &slot, &region);
         assert_eq!(current, raw);
 
         let txn = TxnId::new(SYSTEM_PARTITION, 1);
-        let history = easvt_history_key(entity, attr, &slot, &region, txn);
+        let history = easvt_key(entity, attr, &slot, &region, txn);
         assert_eq!(
             history[..history.len() - T_LEN],
             encode_history_identity(&raw)
@@ -449,16 +503,16 @@ mod tests {
             Slot::Empty,
             Value::Long(30),
         );
-        let key = aesvt_key(entity, attr, &k, &region(&value));
-        assert_eq!(decode_aesvt_key(&key).unwrap(), (attr, entity, k, value));
+        let key = aesv_key(entity, attr, &k, &region(&value));
+        assert_eq!(decode_aesv_key(&key).unwrap(), (attr, entity, k, value));
     }
 
     #[test]
     fn avest_round_trip() {
         let (entity, attr, k, value) =
             (e(42), AttributeId::new(0x0100), position(), Value::Long(-5));
-        let key = avest_key(entity, attr, &k, &region(&value));
-        assert_eq!(decode_avest_key(&key).unwrap(), (attr, value, entity, k));
+        let key = aves_key(entity, attr, &k, &region(&value));
+        assert_eq!(decode_aves_key(&key).unwrap(), (attr, value, entity, k));
     }
 
     #[test]
@@ -466,15 +520,15 @@ mod tests {
         let (entity, attr) = (e(42), AttributeId::new(0x0100));
         let s = Slot::Key(MapKey::String("key".into()));
         let value = Value::String("variable length value".into());
-        let key = avest_key(entity, attr, &s, &region(&value));
-        assert_eq!(decode_avest_key(&key).unwrap(), (attr, value, entity, s));
+        let key = aves_key(entity, attr, &s, &region(&value));
+        assert_eq!(decode_aves_key(&key).unwrap(), (attr, value, entity, s));
     }
 
     #[test]
     fn vaest_round_trip() {
         let (target, attr, source, k) = (e(43), AttributeId::new(0x0102), e(42), position());
-        let key = vaest_key(target, attr, source, &k);
-        assert_eq!(decode_vaest_key(&key).unwrap(), (target, attr, source, k));
+        let key = vaes_key(target, attr, source, &k);
+        assert_eq!(decode_vaes_key(&key).unwrap(), (target, attr, source, k));
     }
 
     #[test]
@@ -484,15 +538,15 @@ mod tests {
         let txn = TxnId::new(SYSTEM_PARTITION, 100);
         let region = region(&value);
         assert_eq!(
-            decode_easvt_history_key(&easvt_history_key(entity, attr, &k, &region, txn)).unwrap(),
+            decode_easvt_key(&easvt_key(entity, attr, &k, &region, txn)).unwrap(),
             (entity, attr, k.clone(), value.clone(), txn)
         );
         assert_eq!(
-            decode_aesvt_history_key(&aesvt_history_key(entity, attr, &k, &region, txn)).unwrap(),
+            decode_aesvt_key(&aesvt_key(entity, attr, &k, &region, txn)).unwrap(),
             (attr, entity, k.clone(), value.clone(), txn)
         );
         assert_eq!(
-            decode_avest_history_key(&avest_history_key(entity, attr, &k, &region, txn)).unwrap(),
+            decode_avest_key(&avest_key(entity, attr, &k, &region, txn)).unwrap(),
             (attr, value, entity, k, txn)
         );
     }
@@ -501,9 +555,9 @@ mod tests {
     fn vaest_history_round_trip() {
         let (target, attr, source, k) = (e(43), AttributeId::new(0x0102), e(42), Slot::Empty);
         let txn = TxnId::new(SYSTEM_PARTITION, 100);
-        let key = vaest_history_key(target, attr, source, &k, txn);
+        let key = vaest_key(target, attr, source, &k, txn);
         assert_eq!(
-            decode_vaest_history_key(&key).unwrap(),
+            decode_vaest_key(&key).unwrap(),
             (target, attr, source, k, txn)
         );
     }
@@ -530,10 +584,10 @@ mod tests {
         let attr_b = AttributeId::new(0x0101);
         let v = region(&Value::Long(1));
         assert!(
-            easvt_key(e(1), attr_b, &Slot::Empty, &v) < easvt_key(e(2), attr_a, &Slot::Empty, &v)
+            easv_key(e(1), attr_b, &Slot::Empty, &v) < easv_key(e(2), attr_a, &Slot::Empty, &v)
         );
         assert!(
-            easvt_key(e(1), attr_a, &Slot::Empty, &v) < easvt_key(e(1), attr_b, &Slot::Empty, &v)
+            easv_key(e(1), attr_a, &Slot::Empty, &v) < easv_key(e(1), attr_b, &Slot::Empty, &v)
         );
     }
 
@@ -541,9 +595,9 @@ mod tests {
     fn easvt_sorts_by_k_within_attribute() {
         let attr = AttributeId::new(0x0100);
         let v = region(&Value::Long(1));
-        let empty = easvt_key(e(1), attr, &Slot::Empty, &v);
-        let first = easvt_key(e(1), attr, &Slot::Position(b"a0".to_vec()), &v);
-        let second = easvt_key(e(1), attr, &Slot::Position(b"a1".to_vec()), &v);
+        let empty = easv_key(e(1), attr, &Slot::Empty, &v);
+        let first = easv_key(e(1), attr, &Slot::Position(b"a0".to_vec()), &v);
+        let second = easv_key(e(1), attr, &Slot::Position(b"a1".to_vec()), &v);
         assert!(empty < first);
         assert!(first < second);
     }
@@ -551,10 +605,10 @@ mod tests {
     #[test]
     fn avest_sorts_by_value_within_attribute() {
         let attr = AttributeId::new(0x0100);
-        let k29 = avest_key(e(2), attr, &Slot::Empty, &region(&Value::Long(29)));
-        let k30 = avest_key(e(1), attr, &Slot::Empty, &region(&Value::Long(30)));
+        let k29 = aves_key(e(2), attr, &Slot::Empty, &region(&Value::Long(29)));
+        let k30 = aves_key(e(1), attr, &Slot::Empty, &region(&Value::Long(30)));
         assert!(k29 < k30);
-        let neg = avest_key(e(1), attr, &Slot::Empty, &region(&Value::Long(-1)));
+        let neg = aves_key(e(1), attr, &Slot::Empty, &region(&Value::Long(-1)));
         assert!(neg < k29);
     }
 
@@ -562,9 +616,9 @@ mod tests {
     fn avest_same_value_sorts_by_entity_then_k() {
         let attr = AttributeId::new(0x0100);
         let v = region(&Value::Long(30));
-        assert!(avest_key(e(1), attr, &Slot::Empty, &v) < avest_key(e(2), attr, &Slot::Empty, &v));
-        let e1_first = avest_key(e(1), attr, &Slot::Position(b"a0".to_vec()), &v);
-        let e1_second = avest_key(e(1), attr, &Slot::Position(b"a1".to_vec()), &v);
+        assert!(aves_key(e(1), attr, &Slot::Empty, &v) < aves_key(e(2), attr, &Slot::Empty, &v));
+        let e1_first = aves_key(e(1), attr, &Slot::Position(b"a0".to_vec()), &v);
+        let e1_second = aves_key(e(1), attr, &Slot::Position(b"a1".to_vec()), &v);
         assert!(e1_first < e1_second);
     }
 
@@ -572,7 +626,7 @@ mod tests {
     fn vaest_sorts_by_target() {
         let attr = AttributeId::new(0x0102);
         assert!(
-            vaest_key(e(1), attr, e(9), &Slot::Empty) < vaest_key(e(2), attr, e(1), &Slot::Empty)
+            vaes_key(e(1), attr, e(9), &Slot::Empty) < vaes_key(e(2), attr, e(1), &Slot::Empty)
         );
     }
 
@@ -583,8 +637,8 @@ mod tests {
         let t1 = TxnId::new(SYSTEM_PARTITION, 1);
         let t2 = TxnId::new(SYSTEM_PARTITION, 2);
         assert!(
-            easvt_history_key(entity, attr, &Slot::Empty, &v, t1)
-                < easvt_history_key(entity, attr, &Slot::Empty, &v, t2)
+            easvt_key(entity, attr, &Slot::Empty, &v, t1)
+                < easvt_key(entity, attr, &Slot::Empty, &v, t2)
         );
     }
 
@@ -593,26 +647,23 @@ mod tests {
         let (entity, attr) = (e(42), AttributeId::new(0x0100));
         let v = region(&Value::Long(30));
         let txn = TxnId::new(SYSTEM_PARTITION, 1);
+        assert!(easv_key(entity, attr, &Slot::Empty, &v).starts_with(&easv_entity_prefix(entity)));
         assert!(
-            easvt_key(entity, attr, &Slot::Empty, &v).starts_with(&easvt_entity_prefix(entity))
+            easv_key(entity, attr, &Slot::Empty, &v)
+                .starts_with(&easv_entity_attr_prefix(entity, attr))
         );
+        assert!(aesv_key(entity, attr, &Slot::Empty, &v).starts_with(&aesv_attr_prefix(attr)));
+        assert!(aves_key(entity, attr, &Slot::Empty, &v).starts_with(&aves_attr_prefix(attr)));
         assert!(
-            easvt_key(entity, attr, &Slot::Empty, &v)
-                .starts_with(&easvt_entity_attr_prefix(entity, attr))
+            aves_key(entity, attr, &Slot::Empty, &v)
+                .starts_with(&avest_attr_value_prefix(attr, &v))
         );
-        assert!(aesvt_key(entity, attr, &Slot::Empty, &v).starts_with(&aesvt_attr_prefix(attr)));
-        assert!(avest_key(entity, attr, &Slot::Empty, &v).starts_with(&avest_attr_prefix(attr)));
+        assert!(vaes_key(e(43), attr, entity, &Slot::Empty).starts_with(&vaes_ref_prefix(e(43))));
         assert!(
-            avest_key(entity, attr, &Slot::Empty, &v).starts_with(&avest_value_prefix(attr, &v))
+            vaes_key(e(43), attr, entity, &Slot::Empty)
+                .starts_with(&vaes_ref_attr_prefix(e(43), attr))
         );
-        assert!(
-            vaest_key(e(43), attr, entity, &Slot::Empty).starts_with(&vaest_target_prefix(e(43)))
-        );
-        assert!(
-            vaest_key(e(43), attr, entity, &Slot::Empty)
-                .starts_with(&vaest_target_attr_prefix(e(43), attr))
-        );
-        assert!(txlog_key(txn, entity, attr, &Slot::Empty, &v).starts_with(&txlog_prefix(txn)));
+        assert!(txlog_key(txn, entity, attr, &Slot::Empty, &v).starts_with(&txlog_txn_prefix(txn)));
     }
 
     #[test]
@@ -663,13 +714,13 @@ mod tests {
     #[test]
     fn prefix_values_do_not_produce_prefix_identities() {
         let (entity, attr) = (e(42), AttributeId::new(0x0100));
-        let short = encode_history_identity(&easvt_key(
+        let short = encode_history_identity(&easv_key(
             entity,
             attr,
             &Slot::Empty,
             &region(&Value::String("a".into())),
         ));
-        let long = encode_history_identity(&easvt_key(
+        let long = encode_history_identity(&easv_key(
             entity,
             attr,
             &Slot::Empty,
@@ -683,9 +734,9 @@ mod tests {
         let t3 = TxnId::new(SYSTEM_PARTITION, 3);
         let short_region = region(&Value::String("a".into()));
         let long_region = region(&Value::String("a\0".into()));
-        let short_t1 = easvt_history_key(entity, attr, &Slot::Empty, &short_region, t1);
-        let short_t3 = easvt_history_key(entity, attr, &Slot::Empty, &short_region, t3);
-        let long_t2 = easvt_history_key(entity, attr, &Slot::Empty, &long_region, t2);
+        let short_t1 = easvt_key(entity, attr, &Slot::Empty, &short_region, t1);
+        let short_t3 = easvt_key(entity, attr, &Slot::Empty, &short_region, t3);
+        let long_t2 = easvt_key(entity, attr, &Slot::Empty, &long_region, t2);
         let mut events = vec![short_t3.clone(), long_t2.clone(), short_t1.clone()];
         events.sort();
         assert_eq!(events, vec![short_t1, short_t3, long_t2]);
@@ -693,12 +744,12 @@ mod tests {
 
     #[test]
     fn decoders_reject_short_keys() {
-        assert!(decode_easvt_key(&[0; 5]).is_err());
-        assert!(decode_avest_key(&[0; 5]).is_err());
-        assert!(decode_vaest_key(&[0; 17]).is_err());
-        assert!(decode_easvt_history_key(&[0; 12]).is_err());
-        assert!(decode_avest_history_key(&[0; 12]).is_err());
-        assert!(decode_vaest_history_key(&[0; 25]).is_err());
+        assert!(decode_easv_key(&[0; 5]).is_err());
+        assert!(decode_aves_key(&[0; 5]).is_err());
+        assert!(decode_vaes_key(&[0; 17]).is_err());
+        assert!(decode_easvt_key(&[0; 12]).is_err());
+        assert!(decode_avest_key(&[0; 12]).is_err());
+        assert!(decode_vaest_key(&[0; 25]).is_err());
         assert!(decode_txlog_key(&[0; 12]).is_err());
     }
 
@@ -710,11 +761,11 @@ mod tests {
         let v = region(&Value::String("a longer value".into()));
         let txn = TxnId::new(SYSTEM_PARTITION, 1);
         for key in [
-            easvt_key(entity, attr, &slot, &v),
-            aesvt_key(entity, attr, &slot, &v),
-            avest_key(entity, attr, &slot, &v),
-            vaest_key(e(43), attr, entity, &slot),
-            easvt_history_key(entity, attr, &slot, &v, txn),
+            easv_key(entity, attr, &slot, &v),
+            aesv_key(entity, attr, &slot, &v),
+            aves_key(entity, attr, &slot, &v),
+            vaes_key(e(43), attr, entity, &slot),
+            easvt_key(entity, attr, &slot, &v, txn),
             txlog_key(txn, entity, attr, &slot, &v),
         ] {
             assert_eq!(key.capacity(), key.len());

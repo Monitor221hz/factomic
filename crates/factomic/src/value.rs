@@ -143,6 +143,20 @@ impl TryFrom<&Value> for bool {
     }
 }
 
+impl TryFrom<Value> for bool {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self> {
+        match value {
+            Value::Bool(v) => Ok(v),
+            other => Err(Error::ValueTypeMismatch {
+                expected: Type::Bool,
+                got: other.value_type(),
+            }),
+        }
+    }
+}
+
 impl From<bool> for Value {
     fn from(value: bool) -> Self {
         Value::Bool(value)
@@ -155,6 +169,20 @@ impl TryFrom<&Value> for i64 {
     fn try_from(value: &Value) -> Result<Self> {
         match value {
             Value::Long(v) => Ok(*v),
+            other => Err(Error::ValueTypeMismatch {
+                expected: Type::Long,
+                got: other.value_type(),
+            }),
+        }
+    }
+}
+
+impl TryFrom<Value> for i64 {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self> {
+        match value {
+            Value::Long(v) => Ok(v),
             other => Err(Error::ValueTypeMismatch {
                 expected: Type::Long,
                 got: other.value_type(),
@@ -176,6 +204,15 @@ macro_rules! impl_small_int {
                 type Error = Error;
 
                 fn try_from(value: &Value) -> Result<Self> {
+                    let value = i64::try_from(value)?;
+                    <$ty>::try_from(value).map_err(|_| Error::CorruptPrimitive(Type::Long))
+                }
+            }
+
+            impl TryFrom<Value> for $ty {
+                type Error = Error;
+
+                fn try_from(value: Value) -> Result<Self> {
                     let value = i64::try_from(value)?;
                     <$ty>::try_from(value).map_err(|_| Error::CorruptPrimitive(Type::Long))
                 }
@@ -206,6 +243,20 @@ impl TryFrom<&Value> for f64 {
     }
 }
 
+impl TryFrom<Value> for f64 {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self> {
+        match value {
+            Value::Double(v) => Ok(v),
+            other => Err(Error::ValueTypeMismatch {
+                expected: Type::Double,
+                got: other.value_type(),
+            }),
+        }
+    }
+}
+
 impl From<f64> for Value {
     fn from(value: f64) -> Self {
         Value::Double(value)
@@ -218,6 +269,20 @@ impl TryFrom<&Value> for String {
     fn try_from(value: &Value) -> Result<Self> {
         match value {
             Value::String(v) => Ok(v.clone()),
+            other => Err(Error::ValueTypeMismatch {
+                expected: Type::String,
+                got: other.value_type(),
+            }),
+        }
+    }
+}
+
+impl TryFrom<Value> for String {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self> {
+        match value {
+            Value::String(v) => Ok(v),
             other => Err(Error::ValueTypeMismatch {
                 expected: Type::String,
                 got: other.value_type(),
@@ -246,6 +311,20 @@ impl TryFrom<&Value> for Vec<u8> {
     }
 }
 
+impl TryFrom<Value> for Vec<u8> {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self> {
+        match value {
+            Value::Bytes(v) => Ok(v),
+            other => Err(Error::ValueTypeMismatch {
+                expected: Type::Bytes,
+                got: other.value_type(),
+            }),
+        }
+    }
+}
+
 impl From<Vec<u8>> for Value {
     fn from(value: Vec<u8>) -> Self {
         Value::Bytes(value)
@@ -266,6 +345,20 @@ impl TryFrom<&Value> for EntityId {
     }
 }
 
+impl TryFrom<Value> for EntityId {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self> {
+        match value {
+            Value::Ref(v) => Ok(v),
+            other => Err(Error::ValueTypeMismatch {
+                expected: Type::Ref,
+                got: other.value_type(),
+            }),
+        }
+    }
+}
+
 impl From<EntityId> for Value {
     fn from(value: EntityId) -> Self {
         Value::Ref(value)
@@ -278,6 +371,20 @@ impl TryFrom<&Value> for Timestamp {
     fn try_from(value: &Value) -> Result<Self> {
         match value {
             Value::Timestamp(v) => Ok(*v),
+            other => Err(Error::ValueTypeMismatch {
+                expected: Type::Timestamp,
+                got: other.value_type(),
+            }),
+        }
+    }
+}
+
+impl TryFrom<Value> for Timestamp {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self> {
+        match value {
+            Value::Timestamp(v) => Ok(v),
             other => Err(Error::ValueTypeMismatch {
                 expected: Type::Timestamp,
                 got: other.value_type(),

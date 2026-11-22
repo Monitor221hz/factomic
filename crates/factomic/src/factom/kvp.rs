@@ -5,12 +5,12 @@ use crate::TxnId;
 use crate::keys;
 impl Factom {
     pub(crate) fn with_easvt_pair(key: &[u8], payload: &[u8]) -> Result<Factom> {
-        let (e, a, s, v) = keys::decode_easvt_key(key)?;
+        let (e, a, s, v) = keys::decode_easv_key(key)?;
         let txn = TxnId::try_from(payload)?;
         Ok(Factom::new(e, a, s, v, txn, Op::Assert))
     }
     pub(crate) fn with_easvt_h_pair(key: &[u8], payload: &[u8]) -> Result<Factom> {
-        let (e, a, k, v, txn) = keys::decode_easvt_history_key(key)?;
+        let (e, a, k, v, txn) = keys::decode_easvt_key(key)?;
         let op = Op::try_from(payload[0])?;
         Ok(Factom::new(e, a, k, v, txn, op))
     }

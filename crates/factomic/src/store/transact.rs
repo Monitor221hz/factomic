@@ -76,25 +76,25 @@ impl Store {
         let payload = txn.to_be_bytes();
         batch.insert(
             &self.easvt,
-            keys::easvt_key(entity, attr, k, region),
+            keys::easv_key(entity, attr, k, region),
             payload,
         );
         batch.insert(
             &self.aesvt,
-            keys::aesvt_key(entity, attr, k, region),
+            keys::aesv_key(entity, attr, k, region),
             payload,
         );
         if def.indexed {
             batch.insert(
                 &self.avest,
-                keys::avest_key(entity, attr, k, region),
+                keys::aves_key(entity, attr, k, region),
                 payload,
             );
         }
         if let Some(target) = ref_target(region)? {
             batch.insert(
                 &self.vaest,
-                keys::vaest_key(target, attr, entity, k),
+                keys::vaes_key(target, attr, entity, k),
                 payload,
             );
         }
@@ -108,13 +108,13 @@ impl Store {
         factom: FactomRef<'_>,
     ) -> Result<()> {
         let (entity, attr, k, region) = (factom.entity, factom.attr, factom.slot, factom.region);
-        batch.remove(&self.easvt, keys::easvt_key(entity, attr, k, region));
-        batch.remove(&self.aesvt, keys::aesvt_key(entity, attr, k, region));
+        batch.remove(&self.easvt, keys::easv_key(entity, attr, k, region));
+        batch.remove(&self.aesvt, keys::aesv_key(entity, attr, k, region));
         if def.indexed {
-            batch.remove(&self.avest, keys::avest_key(entity, attr, k, region));
+            batch.remove(&self.avest, keys::aves_key(entity, attr, k, region));
         }
         if let Some(target) = ref_target(region)? {
-            batch.remove(&self.vaest, keys::vaest_key(target, attr, entity, k));
+            batch.remove(&self.vaest, keys::vaes_key(target, attr, entity, k));
         }
         Ok(())
     }
@@ -133,11 +133,8 @@ impl Store {
     ) -> Result<()> {
         let (entity, attr, k, region) = (factom.entity, factom.attr, factom.slot, factom.region);
         for (keyspace, key_fn) in [
-            (
-                &self.easvt_h,
-                keys::easvt_history_key as fn(_, _, _, _, _) -> _,
-            ),
-            (&self.aesvt_h, keys::aesvt_history_key),
+            (&self.easvt_h, keys::easvt_key as fn(_, _, _, _, _) -> _),
+            (&self.aesvt_h, keys::aesvt_key),
         ] {
             batch.insert(
                 keyspace,
@@ -153,24 +150,24 @@ impl Store {
         if def.indexed {
             batch.insert(
                 &self.avest_h,
-                keys::avest_history_key(entity, attr, k, region, asserted_at),
+                keys::avest_key(entity, attr, k, region, asserted_at),
                 [ASSERT],
             );
             batch.insert(
                 &self.avest_h,
-                keys::avest_history_key(entity, attr, k, region, retracted_at),
+                keys::avest_key(entity, attr, k, region, retracted_at),
                 [RETRACT],
             );
         }
         if let Some(target) = ref_target(region)? {
             batch.insert(
                 &self.vaest_h,
-                keys::vaest_history_key(target, attr, entity, k, asserted_at),
+                keys::vaest_key(target, attr, entity, k, asserted_at),
                 [ASSERT],
             );
             batch.insert(
                 &self.vaest_h,
-                keys::vaest_history_key(target, attr, entity, k, retracted_at),
+                keys::vaest_key(target, attr, entity, k, retracted_at),
                 [RETRACT],
             );
         }
@@ -183,12 +180,12 @@ impl Store {
         let payload = txn.to_be_bytes();
         batch.insert(
             &self.easvt,
-            keys::easvt_key(entity, TX_KIND_ATTR, &Slot::Empty, &region),
+            keys::easv_key(entity, TX_KIND_ATTR, &Slot::Empty, &region),
             payload,
         );
         batch.insert(
             &self.aesvt,
-            keys::aesvt_key(entity, TX_KIND_ATTR, &Slot::Empty, &region),
+            keys::aesv_key(entity, TX_KIND_ATTR, &Slot::Empty, &region),
             payload,
         );
         batch.insert(
@@ -215,12 +212,12 @@ impl Store {
         let payload = txn.to_be_bytes();
         batch.insert(
             &self.easvt,
-            keys::easvt_key(entity, TX_MOVE_ATTR, &Slot::Empty, &region),
+            keys::easv_key(entity, TX_MOVE_ATTR, &Slot::Empty, &region),
             payload,
         );
         batch.insert(
             &self.aesvt,
-            keys::aesvt_key(entity, TX_MOVE_ATTR, &Slot::Empty, &region),
+            keys::aesv_key(entity, TX_MOVE_ATTR, &Slot::Empty, &region),
             payload,
         );
         batch.insert(
@@ -236,12 +233,12 @@ impl Store {
         let payload = txn.to_be_bytes();
         batch.insert(
             &self.easvt,
-            keys::easvt_key(entity, TX_TIMESTAMP_ATTR, &Slot::Empty, &region),
+            keys::easv_key(entity, TX_TIMESTAMP_ATTR, &Slot::Empty, &region),
             payload,
         );
         batch.insert(
             &self.aesvt,
-            keys::aesvt_key(entity, TX_TIMESTAMP_ATTR, &Slot::Empty, &region),
+            keys::aesv_key(entity, TX_TIMESTAMP_ATTR, &Slot::Empty, &region),
             payload,
         );
         batch.insert(
@@ -251,7 +248,7 @@ impl Store {
         );
         batch.insert(
             &self.avest,
-            keys::avest_key(entity, TX_TIMESTAMP_ATTR, &Slot::Empty, &region),
+            keys::aves_key(entity, TX_TIMESTAMP_ATTR, &Slot::Empty, &region),
             payload,
         );
     }

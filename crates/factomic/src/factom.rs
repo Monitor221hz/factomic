@@ -60,33 +60,33 @@ impl MapKey {
     }
 }
 
-impl TryFrom<&MapKey> for String {
+impl TryFrom<MapKey> for String {
     type Error = Error;
 
-    fn try_from(value: &MapKey) -> Result<Self> {
+    fn try_from(value: MapKey) -> Result<Self> {
         match value {
-            MapKey::String(s) => Ok(s.clone()),
+            MapKey::String(s) => Ok(s),
             _ => Err(Error::MapKeyTypeMismatch),
         }
     }
 }
 
-impl TryFrom<&MapKey> for EntityId {
+impl TryFrom<MapKey> for EntityId {
     type Error = Error;
 
-    fn try_from(value: &MapKey) -> Result<Self> {
+    fn try_from(value: MapKey) -> Result<Self> {
         match value {
-            MapKey::Ref(e) => Ok(e.to_owned()),
+            MapKey::Ref(e) => Ok(e),
             _ => Err(Error::MapKeyTypeMismatch),
         }
     }
 }
 
-impl TryFrom<&MapKey> for i64 {
+impl TryFrom<MapKey> for i64 {
     type Error = Error;
-    fn try_from(value: &MapKey) -> Result<Self> {
+    fn try_from(value: MapKey) -> Result<Self> {
         match value {
-            MapKey::Long(i) => Ok(i.to_owned()),
+            MapKey::Long(i) => Ok(i),
             _ => Err(Error::MapKeyTypeMismatch),
         }
     }
@@ -151,6 +151,13 @@ impl Slot {
         }
     }
 
+    pub fn try_to_map_key(self) -> Result<MapKey> {
+        match self {
+            Slot::Key(map_key) => Ok(map_key),
+            _ => Err(Error::CorruptPosition),
+        }
+    }
+
     pub fn encode_key(&self, buf: &mut Vec<u8>) {
         match self {
             Slot::Empty => {
@@ -186,6 +193,86 @@ impl Slot {
                 v.encode(buf);
                 buf.push(FIXED_FRAME_LEN as u8);
             }
+        }
+    }
+
+    pub fn len_key(bytes: &[u8]) -> Result<usize> {
+        let Some(&kind) = bytes.first() else {
+            return Err(Error::CorruptKey {
+                expected: 1,
+                got: 0,
+            });
+        };
+        match kind {
+            0x00 => {
+                if bytes.len() < 2 || bytes[1] != 0x02 {
+                    return Err(Error::CorruptKey {
+                        expected: 2,
+                        got: bytes.len(),
+                    });
+                }
+                Ok(2)
+            }
+            TAG_POSITION => {
+                let Some(end) = bytes[1..].iter().position(|&b| b == TERMINATOR) else {
+                    return Err(Error::CorruptKey {
+                        expected: 4,
+                        got: bytes.len(),
+                    });
+                };
+                let frame = end + 3;
+                if bytes.len() < frame || bytes[frame - 1] as usize != frame {
+                    return Err(Error::CorruptKey {
+                        expected: frame,
+                        got: bytes.len(),
+                    });
+                }
+                Ok(frame)
+            }
+            TAG_STRING => {
+                let mut content = Vec::new();
+                let mut i = 1;
+                loop {
+                    let Some(&b) = bytes.get(i) else {
+                        return Err(Error::CorruptKey {
+                            expected: 4,
+                            got: bytes.len(),
+                        });
+                    };
+                    match b {
+                        ESCAPED => content.push(b),
+                        TERMINATOR => match bytes.get(i + 1) {
+                            Some(&ESCAPED) => {
+                                content.push(0x00);
+                                i += 1;
+                            }
+                            _ => break,
+                        },
+                        _ => content.push(b),
+                    }
+                    i += 1;
+                }
+                let frame = i + 2;
+                if bytes.len() < frame || bytes[frame - 1] as usize != frame {
+                    return Err(Error::CorruptKey {
+                        expected: frame,
+                        got: bytes.len(),
+                    });
+                }
+                Ok(frame)
+            }
+            TAG_LONG | TAG_REF => {
+                if bytes.len() < FIXED_FRAME_LEN
+                    || bytes[FIXED_FRAME_LEN - 1] as usize != FIXED_FRAME_LEN
+                {
+                    return Err(Error::CorruptKey {
+                        expected: FIXED_FRAME_LEN,
+                        got: bytes.len(),
+                    });
+                }
+                Ok(FIXED_FRAME_LEN)
+            }
+            _ => Err(Error::UnknownValueTag(kind)),
         }
     }
 
@@ -391,14 +478,11 @@ impl Factom {
         T::try_from(self.value())
     }
 
-    pub fn try_key_from_slot<'a, T>(&'a self) -> Result<T>
+    pub fn try_to_value<T>(self) -> Result<T>
     where
-        T: TryFrom<&'a MapKey, Error = crate::Error>,
+        T: TryFrom<Value, Error = crate::Error>,
     {
-        match self.slot() {
-            Slot::Key(map_key) => map_key.try_into(),
-            _ => Err(Error::CorruptPosition),
-        }
+        T::try_from(self.value)
     }
 }
 

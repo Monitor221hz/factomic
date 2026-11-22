@@ -201,10 +201,10 @@ impl DecodePrimitive<'_> for Score {
     }
 }
 
-impl TryFrom<&Value> for Score {
+impl TryFrom<Value> for Score {
     type Error = Error;
 
-    fn try_from(value: &Value) -> Result<Self> {
+    fn try_from(value: Value) -> Result<Self> {
         i64::try_from(value).map(Self)
     }
 }
@@ -228,10 +228,10 @@ impl From<CustomMapKey> for MapKey {
     }
 }
 
-impl TryFrom<&MapKey> for CustomMapKey {
+impl TryFrom<MapKey> for CustomMapKey {
     type Error = Error;
 
-    fn try_from(value: &MapKey) -> Result<Self> {
+    fn try_from(value: MapKey) -> Result<Self> {
         i64::try_from(value).map(Self)
     }
 }

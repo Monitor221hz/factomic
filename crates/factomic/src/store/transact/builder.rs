@@ -786,7 +786,7 @@ impl TransactionChanges {
     ) -> Result<()> {
         let key = sv_key(&slot, &region);
         let reference_key =
-            ref_target(&region)?.map(|target| keys::vaest_key(target, attr, entity, &slot));
+            ref_target(&region)?.map(|target| keys::vaes_key(target, attr, entity, &slot));
         let attribute_changes = self
             .by_attribute
             .get_mut(&(entity, attr))
@@ -805,7 +805,7 @@ impl TransactionChanges {
         let reference_key = match factom.txn {
             Some(_) => None,
             None => ref_target(&factom.region)?
-                .map(|target| keys::vaest_key(target, attr, entity, &factom.slot)),
+                .map(|target| keys::vaes_key(target, attr, entity, &factom.slot)),
         };
         self.by_attribute
             .get_mut(&(entity, attr))
@@ -825,7 +825,7 @@ impl TransactionChanges {
             let insert = decode_sv_key(key, None)?;
             if let Some(target) = ref_target(&insert.region)? {
                 self.reference_inserts
-                    .remove(&keys::vaest_key(target, attr, entity, &insert.slot));
+                    .remove(&keys::vaes_key(target, attr, entity, &insert.slot));
             }
         }
         changes.inserts.clear();
@@ -840,7 +840,7 @@ impl TransactionChanges {
     }
 
     fn pending_reference_keys(&self, target: EntityId) -> impl Iterator<Item = &Vec<u8>> {
-        let prefix = keys::vaest_target_prefix(target);
+        let prefix = keys::vaes_ref_prefix(target);
         self.reference_inserts
             .range(prefix.clone()..)
             .take_while(move |key| key.starts_with(&prefix))
@@ -853,7 +853,7 @@ impl TransactionChanges {
             for key in &changes.inserts {
                 let insert = decode_sv_key(key, None).unwrap();
                 if let Some(target) = ref_target(&insert.region).unwrap() {
-                    expected.insert(keys::vaest_key(target, *attr, *entity, &insert.slot));
+                    expected.insert(keys::vaes_key(target, *attr, *entity, &insert.slot));
                 }
             }
         }
@@ -959,7 +959,7 @@ fn visible_assertions(
     let pending = changes.get(entity, attr);
     let mut committed = store
         .easvt
-        .prefix(keys::easvt_entity_attr_prefix(entity, attr))
+        .prefix(keys::easv_entity_attr_prefix(entity, attr))
         .map(|guard| -> Result<Option<_>> {
             let (key, payload) = guard.into_inner()?;
             let factom_key = &key[EA_KEY_OFFSET..];
@@ -1037,7 +1037,7 @@ fn factom_visibility(
             return Ok(FactomVisibility::Absent);
         }
     }
-    let key = keys::easvt_key(entity, attr, slot, region);
+    let key = keys::easv_key(entity, attr, slot, region);
     let Some(payload) = store.easvt.get(&key)? else {
         return Ok(FactomVisibility::Absent);
     };
@@ -1568,19 +1568,19 @@ fn plan_revert_to(store: &Store, changes: &mut TransactionChanges, txn: TxnId) -
     let mut identities = BTreeSet::new();
     for item in past_db.snapshot.iter(&past_db.easvt) {
         let (key, _) = item.into_inner()?;
-        let (entity, attr, _, _) = keys::decode_easvt_key(&key)?;
+        let (entity, attr, _, _) = keys::decode_easv_key(&key)?;
         identities.insert((entity, attr));
     }
 
     for item in past_db.snapshot.iter(&past_db.easvt_h) {
         let (key, _) = item.into_inner()?;
-        let (entity, attr, _, _, _) = keys::decode_easvt_history_key(&key)?;
+        let (entity, attr, _, _, _) = keys::decode_easvt_key(&key)?;
         identities.insert((entity, attr));
     }
 
     for item in store.easvt.iter() {
         let (key, _) = item.into_inner()?;
-        let (entity, attr, _, _) = keys::decode_easvt_key(&key)?;
+        let (entity, attr, _, _) = keys::decode_easv_key(&key)?;
         identities.insert((entity, attr));
     }
 
@@ -1794,9 +1794,9 @@ fn for_each_visible_reference(
     target: EntityId,
     mut visit: impl FnMut(VisibleReference) -> Result<()>,
 ) -> Result<()> {
-    for guard in store.vaest.prefix(keys::vaest_target_prefix(target)) {
+    for guard in store.vaest.prefix(keys::vaes_ref_prefix(target)) {
         let (key, payload) = guard.into_inner()?;
-        let (_, attr, source, slot) = keys::decode_vaest_key(&key)?;
+        let (_, attr, source, slot) = keys::decode_vaes_key(&key)?;
         let region = Value::Ref(target).region();
         if let Some(changes) = changes.get(source, attr)
             && changes.evictions.contains_key(&sv_key(&slot, &region))
@@ -1811,7 +1811,7 @@ fn for_each_visible_reference(
         })?;
     }
     for key in changes.pending_reference_keys(target) {
-        let (_, attr, source, slot) = keys::decode_vaest_key(key)?;
+        let (_, attr, source, slot) = keys::decode_vaes_key(key)?;
         let region = Value::Ref(target).region();
         visit(VisibleReference {
             source,
@@ -1832,7 +1832,7 @@ fn plan_retract_entity(
         return Ok(());
     }
     let mut components = Vec::new();
-    for guard in store.easvt.prefix(keys::easvt_entity_prefix(entity)) {
+    for guard in store.easvt.prefix(keys::easv_entity_prefix(entity)) {
         let (key, payload) = guard.into_inner()?;
         let attr = AttributeId::new(u16::from_be_bytes(key[8..10].try_into().unwrap()));
         let factom_key = &key[EA_KEY_OFFSET..];

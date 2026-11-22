@@ -284,7 +284,7 @@ impl Store {
         let mut one_values = BTreeSet::new();
         let mut maximum_entity = 0_u64;
         for (key, payload) in &current {
-            let (entity, attr, slot, value) = crate::keys::decode_easvt_key(key)
+            let (entity, attr, slot, value) = crate::keys::decode_easv_key(key)
                 .map_err(|error| format!("easvt: invalid key: {error}"))?;
             let txn = TxnId::try_from(payload.as_slice())
                 .map_err(|error| format!("easvt: invalid transaction: {error}"))?;
@@ -292,7 +292,7 @@ impl Store {
                 .get(&attr)
                 .ok_or_else(|| format!("easvt: unknown attribute {attr:?}"))?;
             validate_fact(def, *declared_at, txn, &slot, &value)?;
-            if crate::keys::easvt_key(entity, attr, &slot, &value.region()) != *key {
+            if crate::keys::easv_key(entity, attr, &slot, &value.region()) != *key {
                 return Err("easvt: noncanonical key".into());
             }
             if def.kind == CollectionKind::One && !one_values.insert((entity, attr)) {
@@ -308,14 +308,14 @@ impl Store {
             }
             insert(
                 &mut expected_aesvt,
-                crate::keys::aesvt_key(entity, attr, &slot, &value.region()),
+                crate::keys::aesv_key(entity, attr, &slot, &value.region()),
                 payload.clone(),
                 "aesvt",
             )?;
             if def.indexed {
                 insert(
                     &mut expected_avest,
-                    crate::keys::avest_key(entity, attr, &slot, &value.region()),
+                    crate::keys::aves_key(entity, attr, &slot, &value.region()),
                     payload.clone(),
                     "avest",
                 )?;
@@ -323,7 +323,7 @@ impl Store {
             if let Value::Ref(target) = value {
                 insert(
                     &mut expected_vaest,
-                    crate::keys::vaest_key(target, attr, entity, &slot),
+                    crate::keys::vaes_key(target, attr, entity, &slot),
                     payload.clone(),
                     "vaest",
                 )?;
@@ -344,7 +344,7 @@ impl Store {
         let mut expected_history_avest = Records::new();
         let mut expected_history_vaest = Records::new();
         for (key, payload) in &history {
-            let (entity, attr, slot, value, txn) = crate::keys::decode_easvt_history_key(key)
+            let (entity, attr, slot, value, txn) = crate::keys::decode_easvt_key(key)
                 .map_err(|error| format!("easvt_h: invalid key: {error}"))?;
             if payload.len() != 1 {
                 return Err("easvt_h: invalid operation payload".into());
@@ -355,7 +355,7 @@ impl Store {
                 .or_else(|| definitions.get(&attr))
                 .ok_or_else(|| format!("easvt_h: unknown attribute {attr:?}"))?;
             validate_fact(def, *declared_at, txn, &slot, &value)?;
-            if crate::keys::easvt_history_key(entity, attr, &slot, &value.region(), txn) != *key {
+            if crate::keys::easvt_key(entity, attr, &slot, &value.region(), txn) != *key {
                 return Err("easvt_h: noncanonical key".into());
             }
             if entity.partition() == USER_PARTITION {
@@ -368,14 +368,14 @@ impl Store {
             }
             insert(
                 &mut expected_history_aesvt,
-                crate::keys::aesvt_history_key(entity, attr, &slot, &value.region(), txn),
+                crate::keys::aesvt_key(entity, attr, &slot, &value.region(), txn),
                 payload.clone(),
                 "aesvt_h",
             )?;
             if def.indexed {
                 insert(
                     &mut expected_history_avest,
-                    crate::keys::avest_history_key(entity, attr, &slot, &value.region(), txn),
+                    crate::keys::avest_key(entity, attr, &slot, &value.region(), txn),
                     payload.clone(),
                     "avest_h",
                 )?;
@@ -383,7 +383,7 @@ impl Store {
             if let Value::Ref(target) = value {
                 insert(
                     &mut expected_history_vaest,
-                    crate::keys::vaest_history_key(target, attr, entity, &slot, txn),
+                    crate::keys::vaest_key(target, attr, entity, &slot, txn),
                     payload.clone(),
                     "vaest_h",
                 )?;
@@ -410,7 +410,7 @@ impl Store {
                 return Err("txlog: invalid operation payload".into());
             }
             let op = Op::try_from(payload[0]).map_err(|error| error.to_string())?;
-            let identity = crate::keys::easvt_key(entity, attr, &slot, &value.region());
+            let identity = crate::keys::easv_key(entity, attr, &slot, &value.region());
             events.entry(identity).or_default().push((txn, op));
             maximum_txn = maximum_txn.max(txn);
             if attr == TX_TIMESTAMP_ATTR
@@ -438,10 +438,10 @@ impl Store {
                 if index > 0 && events[index - 1].1 == *op {
                     return Err("txlog: operations do not alternate".into());
                 }
-                let (entity, attr, slot, value) = crate::keys::decode_easvt_key(&identity)
+                let (entity, attr, slot, value) = crate::keys::decode_easv_key(&identity)
                     .map_err(|error| format!("txlog: invalid identity: {error}"))?;
                 let history_key =
-                    crate::keys::easvt_history_key(entity, attr, &slot, &value.region(), *txn);
+                    crate::keys::easvt_key(entity, attr, &slot, &value.region(), *txn);
                 let is_live_assertion = index + 1 == events.len() && *op == Op::Assert;
                 if is_live_assertion {
                     if current_txns.get(&identity) != Some(txn) {
@@ -558,12 +558,12 @@ mod tests {
             }),
             ("live assertion in history", |store| {
                 let (key, payload) = store.easvt.iter().next().unwrap().into_inner().unwrap();
-                let (entity, attr, slot, value) = crate::keys::decode_easvt_key(&key).unwrap();
+                let (entity, attr, slot, value) = crate::keys::decode_easv_key(&key).unwrap();
                 let txn = TxnId::try_from(payload.as_ref()).unwrap();
                 store
                     .easvt_h
                     .insert(
-                        crate::keys::easvt_history_key(entity, attr, &slot, &value.region(), txn),
+                        crate::keys::easvt_key(entity, attr, &slot, &value.region(), txn),
                         [Op::Assert.to_byte()],
                     )
                     .unwrap();
@@ -609,7 +609,7 @@ mod tests {
             .iter()
             .map(|guard| guard.into_inner().unwrap())
             .find_map(|(key, _)| {
-                let (entity, ..) = crate::keys::decode_easvt_key(&key).unwrap();
+                let (entity, ..) = crate::keys::decode_easv_key(&key).unwrap();
                 (entity.partition() == USER_PARTITION).then_some(entity)
             })
             .unwrap()

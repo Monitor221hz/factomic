@@ -157,13 +157,13 @@ impl Db {
         attr: AttributeId,
         ordinal: usize,
     ) -> Result<Option<Slot>> {
-        let prefix = keys::easvt_entity_attr_prefix(entity, attr);
+        let prefix = keys::easv_entity_attr_prefix(entity, attr);
         if let Some(cutoff) = self.as_of {
             let Some(item) = self.visible_easvt(prefix.clone(), cutoff).nth(ordinal) else {
                 return Ok(None);
             };
             let (key, _) = item?;
-            let (_, _, slot, _, _) = keys::decode_easvt_history_key(&key)?;
+            let (_, _, slot, _, _) = keys::decode_easvt_key(&key)?;
             return Ok(Some(slot));
         }
 
@@ -171,7 +171,7 @@ impl Db {
             return Ok(None);
         };
         let (key, _) = guard.into_inner()?;
-        let (_, _, slot, _) = keys::decode_easvt_key(&key)?;
+        let (_, _, slot, _) = keys::decode_easv_key(&key)?;
         Ok(Some(slot))
     }
 
@@ -179,9 +179,9 @@ impl Db {
         let expected = Timestamp::try_from(time)?;
         let region = Value::Timestamp(expected).region();
 
-        let start = keys::avest_attr_prefix(TX_TIMESTAMP_ATTR);
+        let start = keys::aves_attr_prefix(TX_TIMESTAMP_ATTR);
 
-        let mut end = keys::avest_value_prefix(TX_TIMESTAMP_ATTR, &region);
+        let mut end = keys::avest_attr_value_prefix(TX_TIMESTAMP_ATTR, &region);
         end.extend_from_slice(&EntityId::with_value(u64::MAX).to_be_bytes());
         Slot::Empty.encode_key(&mut end);
 
@@ -189,7 +189,7 @@ impl Db {
 
         for entry in entries.rev() {
             let (key, _) = entry.into_inner()?;
-            let (_, _, txn_entity, _) = keys::decode_avest_key(&key)?;
+            let (_, _, txn_entity, _) = keys::decode_aves_key(&key)?;
             let txn = TxnId::with_entity(txn_entity);
 
             if self.as_of.is_some_and(|cutoff| txn > cutoff) {
@@ -201,15 +201,18 @@ impl Db {
 
         Ok(None)
     }
-
-    fn prefix_entity_factom(&self, prefix: &[u8]) -> Result<Option<Factom>> {
+    /// For the first result of a prefix in easvt, maps a result with either `f_easv` (current) or `f_easvt` (cut-off aware) but not both.
+    fn next_easvt_prefix<F, P, R>(&self, prefix: &[u8], f_easv: F, f_easvt: P) -> Result<Option<R>>
+    where
+        F: FnOnce(&[u8]) -> Result<R>,
+        P: FnOnce(&[u8], TxnId) -> Result<R>,
+    {
         if let Some(cutoff) = self.as_of {
             self.visible_easvt(prefix.to_vec(), cutoff)
                 .next()
                 .map(|item| {
                     let (key, asserted_at) = item?;
-                    let (e, a, k, v, _) = keys::decode_easvt_history_key(&key)?;
-                    Ok(Factom::new(e, a, k, v, asserted_at, Op::Assert))
+                    f_easvt(&key, asserted_at)
                 })
                 .transpose()
         } else {
@@ -217,10 +220,37 @@ impl Db {
                 .prefix(&self.easvt, prefix)
                 .next()
                 .map(|item| {
-                    let (key, payload) = item.into_inner()?;
-                    Factom::with_easvt_pair(&key, &payload)
+                    let (key, _) = item.into_inner()?;
+                    f_easv(&key)
                 })
                 .transpose()
+        }
+    }
+
+    /// For the results of a prefix in easvt, maps a result with either `f_easv` (current) or `f_easvt` (cut-off aware) but not both.
+    fn map_easvt_prefix<'a, F, P, R>(
+        &'a self,
+        prefix: Vec<u8>,
+        f_easv: F,
+        f_easvt: P,
+    ) -> impl Iterator<Item = Result<R>> + 'a
+    where
+        F: Fn(&[u8]) -> Result<R> + 'a,
+        P: Fn(&[u8], TxnId) -> Result<R> + 'a,
+    {
+        if let Some(cutoff) = self.as_of {
+            Either::Left(
+                self.visible_easvt(prefix.to_vec(), cutoff)
+                    .map(move |item| {
+                        let (key, asserted_at) = item?;
+                        f_easvt(&key, asserted_at)
+                    }),
+            )
+        } else {
+            Either::Right(self.snapshot.prefix(&self.easvt, prefix).map(move |item| {
+                let (key, _) = item.into_inner()?;
+                f_easv(&key)
+            }))
         }
     }
 
@@ -228,7 +258,7 @@ impl Db {
         if let Some(cutoff) = self.as_of {
             Either::Left(self.visible_easvt(prefix, cutoff).map(|item| {
                 let (key, asserted_at) = item?;
-                let (e, a, k, v, _) = keys::decode_easvt_history_key(&key)?;
+                let (e, a, k, v, _) = keys::decode_easvt_key(&key)?;
                 Ok(Factom::new(e, a, k, v, asserted_at, Op::Assert))
             }))
         } else {
@@ -240,7 +270,7 @@ impl Db {
     }
 
     pub fn entity_factoms(&self, entity: EntityId) -> impl Iterator<Item = Result<Factom>> + '_ {
-        self.prefix_entity_factoms(keys::easvt_entity_prefix(entity))
+        self.prefix_entity_factoms(keys::easv_entity_prefix(entity))
     }
 
     pub fn entity_exists(&self, entity: EntityId) -> Result<bool> {
@@ -252,16 +282,18 @@ impl Db {
         entity: EntityId,
         attr: AttributeId,
     ) -> impl Iterator<Item = Result<Factom>> + '_ {
-        self.prefix_entity_factoms(keys::easvt_entity_attr_prefix(entity, attr))
+        self.prefix_entity_factoms(keys::easv_entity_attr_prefix(entity, attr))
     }
 
     pub fn entity_value<T>(&self, entity: EntityId, attr: AttributeId) -> Result<Option<T>>
     where
-        T: for<'a> TryFrom<&'a Value, Error = crate::Error>,
+        T: TryFrom<Value, Error = crate::Error>,
     {
-        self.prefix_entity_factom(&keys::easvt_entity_attr_prefix(entity, attr))?
-            .map(|f| f.try_from_value())
-            .transpose()
+        self.next_easvt_prefix(
+            &keys::easv_entity_attr_prefix(entity, attr),
+            |easv| T::try_from(keys::decode_v_easv_key(easv)?),
+            |easvt, _| T::try_from(keys::decode_v_easvt_key(easvt)?),
+        )
     }
 
     pub fn entity_values<T>(
@@ -270,10 +302,13 @@ impl Db {
         attr: AttributeId,
     ) -> impl Iterator<Item = Result<T>> + '_
     where
-        T: for<'a> TryFrom<&'a Value, Error = crate::Error>,
+        T: TryFrom<Value, Error = crate::Error>,
     {
-        self.prefix_entity_factoms(keys::easvt_entity_attr_prefix(entity, attr))
-            .map(|f| f.and_then(|f| f.try_from_value::<T>()))
+        self.map_easvt_prefix(
+            keys::easv_entity_attr_prefix(entity, attr),
+            |easv| T::try_from(keys::decode_v_easv_key(easv)?),
+            |easvt, _| T::try_from(keys::decode_v_easvt_key(easvt)?),
+        )
     }
 
     pub fn entity_value_at<T>(
@@ -283,14 +318,22 @@ impl Db {
         ordinal: usize,
     ) -> Result<Option<T>>
     where
-        T: for<'a> TryFrom<&'a Value, Error = crate::Error>,
+        T: TryFrom<Value, Error = crate::Error>,
     {
-        let Some(slot) = self.slot_at(entity, attr, ordinal)? else {
-            return Ok(None);
-        };
-        self.prefix_entity_factom(&keys::easvt_entity_attr_slot_prefix(entity, attr, &slot))?
-            .map(|f| f.try_from_value())
-            .transpose()
+        // let Some(slot) = self.slot_at(entity, attr, ordinal)? else {
+        //     return Ok(None);
+        // };
+        // self.prefix_entity_factom(&keys::easv_entity_attr_slot_prefix(entity, attr, &slot))?
+        //     .map(|f| f.try_to_value())
+        //     .transpose()
+        //
+        self.map_easvt_prefix(
+            keys::easv_entity_attr_prefix(entity, attr),
+            |easv| T::try_from(keys::decode_v_easv_key(easv)?),
+            |easvt, _| T::try_from(keys::decode_v_easvt_key(easvt)?),
+        )
+        .nth(ordinal)
+        .transpose()
     }
 
     pub fn entity_keyvalues<K, V>(
@@ -299,14 +342,20 @@ impl Db {
         attr: AttributeId,
     ) -> impl Iterator<Item = Result<(K, V)>> + '_
     where
-        K: for<'a> TryFrom<&'a MapKey, Error = crate::Error>,
-        V: for<'a> TryFrom<&'a Value, Error = crate::Error>,
+        K: TryFrom<MapKey, Error = crate::Error>,
+        V: TryFrom<Value, Error = crate::Error>,
     {
-        self.prefix_entity_factoms(keys::easvt_entity_attr_prefix(entity, attr))
-            .map(|f| {
-                let f = f?;
-                Ok((f.try_key_from_slot::<K>()?, f.try_from_value::<V>()?))
-            })
+        self.map_easvt_prefix(
+            keys::easv_entity_attr_prefix(entity, attr),
+            |easv| {
+                let (slot, value) = keys::decode_sv_easv_key(easv)?;
+                Ok((K::try_from(slot.try_to_map_key()?)?, V::try_from(value)?))
+            },
+            |easvt, _| {
+                let (slot, value) = keys::decode_sv_easvt_key(easvt)?;
+                Ok((K::try_from(slot.try_to_map_key()?)?, V::try_from(value)?))
+            },
+        )
     }
 
     pub fn entity_keyvalue<V>(
@@ -316,13 +365,14 @@ impl Db {
         key: impl Into<MapKey>,
     ) -> Result<Option<V>>
     where
-        V: for<'a> TryFrom<&'a Value, Error = crate::Error>,
+        V: TryFrom<Value, Error = crate::Error>,
     {
         let slot = Slot::Key(key.into());
-
-        self.prefix_entity_factom(&keys::easvt_entity_attr_slot_prefix(entity, attr, &slot))?
-            .map(|factom| factom.try_from_value())
-            .transpose()
+        self.next_easvt_prefix(
+            &keys::easv_entity_attr_slot_prefix(entity, attr, &slot),
+            |easv| V::try_from(keys::decode_v_easv_key(easv)?),
+            |easvt, _| V::try_from(keys::decode_v_easvt_key(easvt)?),
+        )
     }
 
     pub fn entity_history(&self, entity: EntityId) -> impl Iterator<Item = Result<Factom>> + '_ {
@@ -330,7 +380,7 @@ impl Db {
         self.snapshot
             .prefix(
                 &self.easvt_h,
-                keys::escape_identity(&keys::easvt_entity_prefix(entity)),
+                keys::escape_identity(&keys::easv_entity_prefix(entity)),
             )
             .filter_map(move |item| {
                 let decoded = (|| -> Result<_> {
@@ -363,12 +413,12 @@ impl Db {
         let mut region = Vec::with_capacity(9);
         region.push(tag_for_type(V::TYPE));
         value.encode(&mut region);
-        let prefix = keys::avest_value_prefix(attribute, &region);
+        let prefix = keys::avest_attr_value_prefix(attribute, &region);
         let mut entities = Vec::new();
         if let Some(cutoff) = self.as_of {
             for item in self.visible_avest(prefix, cutoff) {
                 let (key, _) = item?;
-                let (_, _, entity, _, _) = keys::decode_avest_history_key(&key)?;
+                let (_, _, entity, _, _) = keys::decode_avest_key(&key)?;
                 entities.push(entity);
             }
             entities.dedup();
@@ -377,7 +427,7 @@ impl Db {
 
         for item in self.snapshot.prefix(&self.avest, prefix) {
             let (key, _) = item.into_inner()?;
-            let (_, _, entity, _) = keys::decode_avest_key(&key)?;
+            let (_, _, entity, _) = keys::decode_aves_key(&key)?;
             entities.push(entity);
         }
         entities.dedup();
@@ -397,12 +447,12 @@ impl Db {
                 got: def.value_type,
             });
         }
-        let prefix = keys::vaest_target_attr_prefix(target, attribute);
+        let prefix = keys::vaes_ref_attr_prefix(target, attribute);
         let mut entities = Vec::new();
         if let Some(cutoff) = self.as_of {
             for item in self.visible_vaest(prefix, cutoff) {
                 let (key, _) = item?;
-                let (_, _, source, _, _) = keys::decode_vaest_history_key(&key)?;
+                let (_, _, source, _, _) = keys::decode_vaest_key(&key)?;
                 entities.push(source);
             }
             entities.dedup();
@@ -411,7 +461,7 @@ impl Db {
 
         for item in self.snapshot.prefix(&self.vaest, prefix) {
             let (key, _) = item.into_inner()?;
-            let (_, _, source, _) = keys::decode_vaest_key(&key)?;
+            let (_, _, source, _) = keys::decode_vaes_key(&key)?;
             entities.push(source);
         }
         entities.dedup();
@@ -424,7 +474,7 @@ impl Db {
         }
         Either::Right(
             self.snapshot
-                .prefix(&self.txlog, keys::txlog_prefix(txn))
+                .prefix(&self.txlog, keys::txlog_txn_prefix(txn))
                 .map(|item| {
                     let (key, payload) = item.into_inner()?;
                     Factom::with_txlog_pair(&key, &payload)
@@ -489,7 +539,7 @@ impl Db {
         slot: &Slot,
         value: &Value,
     ) -> Result<Option<Factom>> {
-        self.prefix_latest_factom(&keys::easvt_entity_attr_slot_value_prefix(
+        self.prefix_latest_factom(&keys::easv_entity_attr_slot_value_prefix(
             entity,
             attribute,
             slot,
@@ -498,7 +548,7 @@ impl Db {
     }
 
     pub fn entity_latest_factom(&self, entity: EntityId) -> Result<Option<Factom>> {
-        self.prefix_latest_factom(&keys::easvt_entity_prefix(entity))
+        self.prefix_latest_factom(&keys::easv_entity_prefix(entity))
     }
 
     /// Helper method that internally calls [Db::latest_factom]
