@@ -1,4 +1,6 @@
-use crate::value::Type;
+use std::time::SystemTime;
+
+use crate::{TxnId, value::Type};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -7,6 +9,12 @@ pub enum Error {
 
     #[error("unknown attribute: {0}")]
     UnknownAttribute(String),
+
+    #[error("unknown transaction: {0:?}")]
+    UnknownTransaction(TxnId),
+
+    #[error("no transaction before {0:?}")]
+    NoTransactionBeforeTime(SystemTime),
 
     #[error("attribute is not indexed: {0}")]
     AttributeNotIndexed(String),
@@ -80,6 +88,9 @@ pub enum Error {
 
     #[error("slice error {0}")]
     SliceError(#[from] std::array::TryFromSliceError),
+
+    #[error("no transaction before time")]
+    NoTransactionBeforeTimeError,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

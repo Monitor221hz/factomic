@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 use fjall::OwnedWriteBatch;
 use jiff::Timestamp;
 
@@ -405,9 +407,26 @@ impl Store {
         self.transact().retract_entity(entity).commit()
     }
 
+    pub fn revert_to(&self, txn: TxnId) -> Result<Option<TxnId>> {
+        self.transact().revert_to(txn).commit()
+    }
+
+    pub fn revert_to_time(&self, time: SystemTime) -> Result<Option<TxnId>> {
+        self.transact().revert_to_time(time).commit()
+    }
+
+    pub fn undo_txn(&self, txn: TxnId) -> Result<Option<TxnId>> {
+        self.transact().undo_txn(txn).commit()
+    }
+
+    pub fn undo_entity_latest(&self, entity: EntityId) -> Result<Option<TxnId>> {
+        self.transact().undo_entity_latest(entity).commit()
+    }
+
     pub fn revert_txn(&self, txn: TxnId) -> Result<Option<TxnId>> {
         let mut tx = self.transact();
-        for factom in self.db().tx_factoms(txn)? {
+        for factom in self.db().tx_factoms(txn) {
+            let factom = factom?;
             if factom.attribute() == TX_TIMESTAMP_ATTR {
                 continue;
             }
@@ -434,6 +453,7 @@ impl Store {
 mod tests {
     use super::*;
     use crate::factom::{Factom, MapKey};
+    use itertools::Itertools;
     use tempfile::TempDir;
 
     fn temp_store() -> (TempDir, Store) {
@@ -631,7 +651,7 @@ mod tests {
             .unwrap();
         let e = store.new_entity().unwrap();
         let txn = store.assert(e, name, &"alice").unwrap().unwrap();
-        let factoms = store.db().tx_factoms(txn).unwrap();
+        let factoms = store.db().tx_factoms(txn).flatten().collect_vec();
         assert_eq!(factoms.len(), 2);
         assert!(
             factoms
@@ -756,7 +776,7 @@ mod tests {
             .unwrap();
         assert_eq!(factoms.len(), 2);
         assert!(factoms.iter().all(|f| f.txn() == txn));
-        assert_eq!(store.db().tx_factoms(txn).unwrap().len(), 3);
+        assert_eq!(store.db().tx_factoms(txn).flatten().collect_vec().len(), 3);
     }
 
     #[test]
@@ -777,7 +797,7 @@ mod tests {
             .commit()
             .unwrap()
             .unwrap();
-        let logged = store.db().tx_factoms(txn).unwrap();
+        let logged = store.db().tx_factoms(txn).flatten().collect_vec();
         assert_eq!(logged.len(), 2);
         assert!(
             logged
@@ -812,7 +832,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        let logged = store.db().tx_factoms(reverted).unwrap();
+        let logged = store.db().tx_factoms(reverted).flatten().collect_vec();
         assert_eq!(logged.len(), 3);
         assert_eq!(logged.iter().filter(|f| f.op() == Op::Retract).count(), 2);
     }

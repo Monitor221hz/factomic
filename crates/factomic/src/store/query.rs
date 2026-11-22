@@ -218,9 +218,7 @@ impl Db {
                 .next()
                 .map(|item| {
                     let (key, payload) = item.into_inner()?;
-                    let (e, a, k, v) = keys::decode_easvt_key(&key)?;
-                    let txn = TxnId::try_from(payload.as_ref())?;
-                    Ok(Factom::new(e, a, k, v, txn, Op::Assert))
+                    Factom::with_easvt_pair(&key, &payload)
                 })
                 .transpose()
         }
@@ -236,9 +234,7 @@ impl Db {
         } else {
             Either::Right(self.snapshot.prefix(&self.easvt, prefix).map(|item| {
                 let (key, payload) = item.into_inner()?;
-                let (e, a, k, v) = keys::decode_easvt_key(&key)?;
-                let txn = TxnId::try_from(payload.as_ref())?;
-                Ok(Factom::new(e, a, k, v, txn, Op::Assert))
+                Factom::with_easvt_pair(&key, &payload)
             }))
         }
     }
@@ -339,9 +335,7 @@ impl Db {
             .filter_map(move |item| {
                 let decoded = (|| -> Result<_> {
                     let (key, payload) = item.into_inner()?;
-                    let (e, a, k, v, txn) = keys::decode_easvt_history_key(&key)?;
-                    let op = Op::try_from(payload[0])?;
-                    Ok(Factom::new(e, a, k, v, txn, op))
+                    Factom::with_easvt_h_pair(&key, &payload)
                 })();
                 match decoded {
                     Ok(factom) if cutoff.is_some_and(|cutoff| factom.txn() > cutoff) => None,
@@ -424,19 +418,97 @@ impl Db {
         Ok(entities)
     }
 
-    pub fn tx_factoms(&self, txn: TxnId) -> Result<Vec<Factom>> {
+    pub fn tx_factoms(&self, txn: TxnId) -> impl Iterator<Item = Result<Factom>> + '_ {
         if self.as_of.is_some_and(|cutoff| txn > cutoff) {
-            return Ok(Vec::new());
+            return Either::Left(std::iter::empty());
         }
+        Either::Right(
+            self.snapshot
+                .prefix(&self.txlog, keys::txlog_prefix(txn))
+                .map(|item| {
+                    let (key, payload) = item.into_inner()?;
+                    Factom::with_txlog_pair(&key, &payload)
+                }),
+        )
+    }
 
-        let mut factoms = Vec::new();
-        for item in self.snapshot.prefix(&self.txlog, keys::txlog_prefix(txn)) {
+    fn prefix_latest_factom(&self, prefix: &[u8]) -> Result<Option<Factom>> {
+        let current = match self.snapshot.prefix(&self.easvt, prefix).next() {
+            Some(item) => {
+                let (key, payload) = item.into_inner()?;
+                let factom = Factom::with_easvt_pair(&key, &payload)?;
+                if self.as_of.is_some_and(|cutoff| factom.txn() > cutoff) {
+                    None
+                } else {
+                    Some(factom)
+                }
+            }
+            None => None,
+        };
+
+        let decode_history = |item: fjall::Guard| -> Result<Factom> {
             let (key, payload) = item.into_inner()?;
-            let (txn, entity, attribute, k, value) = keys::decode_txlog_key(&key)?;
-            let op = Op::try_from(payload[0])?;
-            factoms.push(Factom::new(entity, attribute, k, value, txn, op));
+            Factom::with_easvt_h_pair(&key, &payload)
+        };
+        let history_prefix = keys::escape_identity(prefix);
+        let historical = if let Some(cutoff) = self.as_of {
+            self.snapshot
+                .prefix(&self.easvt_h, history_prefix)
+                .rev()
+                .find_map(|item| match decode_history(item) {
+                    Ok(factom) if factom.txn() <= cutoff => Some(Ok(factom)),
+                    Ok(_) => None,
+                    Err(error) => Some(Err(error)),
+                })
+        } else {
+            self.snapshot
+                .prefix(&self.easvt_h, history_prefix)
+                .next_back()
+                .map(decode_history)
+        };
+        let historical = match historical {
+            Some(result) => Some(result?),
+            None => None,
+        };
+
+        match (current, historical) {
+            (Some(current), Some(historical)) if current.txn() >= historical.txn() => {
+                Ok(Some(current))
+            }
+            (Some(_), Some(historical)) => Ok(Some(historical)),
+            (Some(current), None) => Ok(Some(current)),
+            (None, Some(historical)) => Ok(Some(historical)),
+            (None, None) => Ok(None),
         }
-        Ok(factoms)
+    }
+    /// Latest committed assertion or retraction for an identity
+    pub fn identity_latest_factom(
+        &self,
+        entity: EntityId,
+        attribute: AttributeId,
+        slot: &Slot,
+        value: &Value,
+    ) -> Result<Option<Factom>> {
+        self.prefix_latest_factom(&keys::easvt_entity_attr_slot_value_prefix(
+            entity,
+            attribute,
+            slot,
+            &value.region(),
+        ))
+    }
+
+    pub fn entity_latest_factom(&self, entity: EntityId) -> Result<Option<Factom>> {
+        self.prefix_latest_factom(&keys::easvt_entity_prefix(entity))
+    }
+
+    /// Helper method that internally calls [Db::latest_factom]
+    pub fn latest_of_factom(&self, factom: &Factom) -> Result<Option<Factom>> {
+        self.identity_latest_factom(
+            factom.entity(),
+            factom.attribute(),
+            factom.slot(),
+            factom.value(),
+        )
     }
 }
 
@@ -471,7 +543,7 @@ mod tests {
     fn tx_time(db: &Db, txn: TxnId) -> SystemTime {
         let timestamp = db
             .tx_factoms(txn)
-            .unwrap()
+            .flatten()
             .into_iter()
             .find(|factom| factom.attribute() == TX_TIMESTAMP_ATTR)
             .map(|factom| match factom.value() {
@@ -621,8 +693,8 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].txn(), t1);
         assert_eq!(history[0].op(), Op::Assert);
-        assert!(at_t1.tx_factoms(t2).unwrap().is_empty());
-        assert!(!at_t1.tx_factoms(t1).unwrap().is_empty());
+        assert!(at_t1.tx_factoms(t2).next().is_none());
+        assert!(at_t1.tx_factoms(t1).next().is_some());
 
         let history = db
             .at(t2)
@@ -642,7 +714,68 @@ mod tests {
             .collect::<Result<Vec<_>>>()
             .unwrap();
         assert_eq!(history.len(), 4);
-        assert!(!db.tx_factoms(t2).unwrap().is_empty());
+        assert!(db.tx_factoms(t2).next().is_some());
+    }
+
+    #[test]
+    fn latest_operation_returns_assertion_or_retraction_by_txn() {
+        let (_dir, store) = temp_store();
+        let entity = store.new_entity().unwrap();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let t1 = store.assert(entity, name, &"alice").unwrap().unwrap();
+        let t2 = store.assert(entity, name, &"bob").unwrap().unwrap();
+        let t3 = store.retract(entity, name, &"bob").unwrap().unwrap();
+        let db = store.db();
+
+        let latest = db
+            .identity_latest_factom(entity, name, &Slot::Empty, &Value::String("bob".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.op(), Op::Retract);
+        assert_eq!(latest.txn(), t3);
+        assert_eq!(latest.value(), &Value::String("bob".into()));
+
+        let at_t2 = db.at(t2);
+        let latest = at_t2
+            .identity_latest_factom(entity, name, &Slot::Empty, &Value::String("bob".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.op(), Op::Assert);
+        assert_eq!(latest.txn(), t2);
+
+        let at_t1 = db.at(t1);
+        let latest = at_t1
+            .identity_latest_factom(entity, name, &Slot::Empty, &Value::String("alice".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.op(), Op::Assert);
+        assert_eq!(latest.txn(), t1);
+
+        let before_all = db.at(TxnId::with_value(0));
+        assert!(
+            before_all
+                .identity_latest_factom(entity, name, &Slot::Empty, &Value::String("bob".into()))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn latest_operation_returns_none_for_missing_identity() {
+        let (_dir, store) = temp_store();
+        let entity = store.new_entity().unwrap();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        assert!(
+            store
+                .db()
+                .identity_latest_factom(entity, name, &Slot::Empty, &Value::String("carol".into()))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -839,7 +972,7 @@ mod tests {
             vec![entity]
         );
         assert!(at_t1.entities_with_value(age, &31_i64).unwrap().is_empty());
-        assert!(at_t1.tx_factoms(t2).unwrap().is_empty());
+        assert!(at_t1.tx_factoms(t2).next().is_none());
         assert!(
             at_t1
                 .entity_history(entity)
@@ -849,7 +982,7 @@ mod tests {
                 .all(|factom| factom.txn() <= t1)
         );
 
-        let log = db.tx_factoms(t2).unwrap();
+        let log = db.tx_factoms(t2).flatten().collect_vec();
         for attr in [age, friend, items, scores] {
             assert!(log.iter().any(|factom| factom.attribute() == attr));
         }

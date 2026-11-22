@@ -197,6 +197,7 @@ pub struct Store {
     pub(crate) db: Database,
     pub(crate) meta: Keyspace,
     pub(crate) attrs: Keyspace,
+    pub(crate) attrs_h: Keyspace,
     pub(crate) easvt: Keyspace,
     pub(crate) aesvt: Keyspace,
     pub(crate) avest: Keyspace,
@@ -356,6 +357,7 @@ impl Store {
             true
         };
         let attrs = db.keyspace("attrs", KeyspaceCreateOptions::default)?;
+        let attrs_h = db.keyspace("attrs_h", KeyspaceCreateOptions::default)?;
         let easvt = db.keyspace("easvt", KeyspaceCreateOptions::default)?;
         let aesvt = db.keyspace("aesvt", KeyspaceCreateOptions::default)?;
         let avest = db.keyspace("avest", KeyspaceCreateOptions::default)?;
@@ -391,6 +393,7 @@ impl Store {
             db,
             meta,
             attrs,
+            attrs_h,
             easvt,
             aesvt,
             avest,
@@ -776,8 +779,7 @@ mod tests {
         );
         assert!(
             db.tx_factoms(declaration)
-                .unwrap()
-                .iter()
+                .flatten()
                 .any(|factom| factom.attribute() == TX_TIMESTAMP_ATTR)
         );
 

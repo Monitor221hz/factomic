@@ -177,6 +177,12 @@ impl<'a, T: Entity> EntityTransaction<'a, T> {
         self
     }
 
+    pub fn undo(&mut self) -> &mut Self {
+        let entity = self.entity();
+        self.transaction_mut().undo_entity_latest(entity);
+        self
+    }
+
     pub fn commit(&mut self) -> Result<Option<TxnId>> {
         self.transaction.commit()
     }
@@ -472,29 +478,6 @@ mod tests {
                     Err(e) => Err(e),
                 })
         }
-
-        // fn model(&self) -> Result<Option<Person>> {
-        //     let Some(name) = self.name()? else {
-        //         return Ok(None);
-        //     };
-        //     let Some(age) = self.age()? else {
-        //         return Ok(None);
-        //     };
-        //     let bucket_list = self.bucket_list().collect::<Result<Vec<_>>>()?;
-        //     let Some(ancestor) = self.ancestor()? else {
-        //         return Ok(None);
-        //     };
-        //     let children = self.children().collect::<Result<Vec<_>>>()?; //all types that impl FromIterator
-        //     let friends = self.friends().collect::<Result<HashMap<_, _>>>()?;
-        //     Ok(Some(Person {
-        //         name,
-        //         age,
-        //         bucket_list,
-        //         ancestor,
-        //         children: todo!(),
-        //         friends: todo!(),
-        //     }))
-        // }
     }
 
     pub trait PersonEntityMut: Sized {

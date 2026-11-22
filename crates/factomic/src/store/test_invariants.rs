@@ -125,6 +125,7 @@ impl Store {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for (name, keyspace) in [
             ("attrs", &self.attrs),
+            ("attrs_h", &self.attrs_h),
             ("easvt", &self.easvt),
             ("aesvt", &self.aesvt),
             ("avest", &self.avest),
@@ -153,6 +154,7 @@ impl Store {
         let snapshot = self.db.snapshot();
         let meta = entries(&snapshot, &self.meta)?;
         let attrs = entries(&snapshot, &self.attrs)?;
+        let history_records = entries(&snapshot, &self.attrs_h)?;
         let current = entries(&snapshot, &self.easvt)?;
         let current_aesvt = entries(&snapshot, &self.aesvt)?;
         let current_avest = entries(&snapshot, &self.avest)?;
@@ -207,6 +209,18 @@ impl Store {
             if names.get(&def.name) != Some(id) {
                 return Err(format!("attrs: missing reverse mapping for {}", def.name));
             }
+        }
+
+        let mut history_definitions = BTreeMap::new();
+        for (key, value) in &history_records {
+            if key[0] != BY_ATTR_PREFIX {
+                continue;
+            }
+            let id = AttributeId::try_from(&key[1..])
+                .map_err(|error| format!("attrs_h: invalid ID key: {error}"))?;
+            let (def, declared_at) = decode_attr_value(value)
+                .map_err(|error| format!("attrs_h: invalid definition: {error}"))?;
+            history_definitions.insert(id, (def, declared_at));
         }
 
         for (id, name, value_type, kind, indexed) in [
@@ -336,8 +350,9 @@ impl Store {
                 return Err("easvt_h: invalid operation payload".into());
             }
             Op::try_from(payload[0]).map_err(|error| error.to_string())?;
-            let (def, declared_at) = definitions
+            let (def, declared_at) = history_definitions
                 .get(&attr)
+                .or_else(|| definitions.get(&attr))
                 .ok_or_else(|| format!("easvt_h: unknown attribute {attr:?}"))?;
             validate_fact(def, *declared_at, txn, &slot, &value)?;
             if crate::keys::easvt_history_key(entity, attr, &slot, &value.region(), txn) != *key {
@@ -792,8 +807,7 @@ mod tests {
             reopened
                 .db()
                 .tx_factoms(committed)
-                .unwrap()
-                .iter()
+                .flatten()
                 .any(|factom| factom.attribute() == TX_TIMESTAMP_ATTR)
         );
         reopened.check_invariants().unwrap();

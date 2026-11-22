@@ -3,6 +3,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use factomic::{AttributeDef, AttributeId, CollectionKind, EntityId, Result, Store, TxnId, Type};
+use itertools::Itertools;
 use tempfile::TempDir;
 
 fn def(name: &str, value_type: Type, kind: CollectionKind) -> AttributeDef {
@@ -171,7 +172,7 @@ fn concurrent_writers_preserve_all_independent_insertions() {
                 .unwrap(),
             vec![value]
         );
-        assert!(db.tx_factoms(txn).unwrap().len() >= 2);
+        assert!(db.tx_factoms(txn).flatten().collect_vec().len() >= 2);
     }
 }
 
@@ -231,7 +232,7 @@ fn contended_writers_publish_complete_pairs_and_logs() {
             historical.entity_value::<i64>(entity, version).unwrap(),
             Some(index)
         );
-        let log = db.tx_factoms(txn).unwrap();
+        let log = db.tx_factoms(txn).flatten().collect_vec();
         assert!(log.iter().any(|factom| factom.attribute() == name));
         assert!(log.iter().any(|factom| factom.attribute() == version));
     }

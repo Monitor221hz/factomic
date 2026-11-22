@@ -6,6 +6,7 @@ use std::sync::Arc;
 use factomic::{
     AttributeDef, AttributeId, CollectionKind, EntityId, Result, Schema, Store, TxnId, Type,
 };
+use itertools::Itertools;
 use tempfile::TempDir;
 
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -113,6 +114,20 @@ fn typed_retraction_removes_current_existence_and_is_idempotent() -> Result<()> 
     Ok(())
 }
 
+#[test]
+fn handle_revert_to_restores_latest_value() -> TestResult {
+    let (_dir, store) = temp_store();
+    let person = store.create::<Person>()?;
+    let alice = person.transact().set_name("Alice").commit()?.unwrap();
+    let bob = person.transact().set_name("Bob").commit()?.unwrap();
+
+    let restored = store.revert_to(alice);
+    assert!(restored.unwrap().is_some());
+    assert_eq!(person.read().name()?, Some("Alice".into()));
+    assert_eq!(person.read_at(bob)?.unwrap().name()?, Some("Bob".into()));
+    Ok(())
+}
+
 const CHILD: &str = "FACTOMIC_DURABILITY_TEST_CHILD";
 const DB_PATH: &str = "FACTOMIC_DURABILITY_TEST_DB";
 const IDS_PATH: &str = "FACTOMIC_DURABILITY_TEST_IDS";
@@ -174,10 +189,10 @@ fn run_successful_mutations(test_name: &str, abort: bool) -> TestResult {
     assert_eq!(declaration_view.txn(), txn);
     assert_eq!(declaration_view.as_of(), Some(declaration));
     assert!(declaration_view.entity::<Person>(entity)?.is_none());
-    assert_eq!(db.tx_factoms(declaration)?.len(), 1);
+    assert_eq!(db.tx_factoms(declaration).flatten().collect_vec().len(), 1);
     assert!(
-        db.tx_factoms(txn)?
-            .iter()
+        db.tx_factoms(txn)
+            .flatten()
             .any(|factom| factom.entity() == entity && factom.attribute() == schema.name)
     );
 
@@ -251,7 +266,15 @@ fn declaration_only_survives_abort() -> TestResult {
     assert_eq!(store.db().txn(), declaration);
     assert_eq!(store.db().attribute_id("person/name")?, Some(name));
     assert_eq!(store.db().attribute_id("person/age")?, Some(age));
-    assert_eq!(store.db().tx_factoms(declaration)?.len(), 1);
+    assert_eq!(
+        store
+            .db()
+            .tx_factoms(declaration)
+            .flatten()
+            .collect_vec()
+            .len(),
+        1
+    );
     assert_eq!(
         store.declare_attributes([
             test_def("person/name", Type::String),

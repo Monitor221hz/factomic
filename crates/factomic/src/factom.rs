@@ -5,6 +5,8 @@ use crate::id::{AttributeId, EntityId, TxnId};
 use crate::primitive::{DecodePrimitive, EncodePrimitive};
 use crate::value::{TAG_LONG, TAG_REF, TAG_STRING, Type, Value};
 
+pub mod kvp;
+
 const TAG_POSITION: u8 = 0x01;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

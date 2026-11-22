@@ -344,6 +344,19 @@ pub fn easvt_entity_attr_slot_prefix(e: EntityId, a: AttributeId, s: &Slot) -> V
     prefix
 }
 
+pub fn easvt_entity_attr_slot_value_prefix(
+    e: EntityId,
+    a: AttributeId,
+    s: &Slot,
+    v: &[u8],
+) -> Vec<u8> {
+    let mut prefix = easvt_entity_prefix(e); // todo: prealloc
+    prefix.extend_from_slice(&a.to_be_bytes());
+    s.encode_key(&mut prefix);
+    prefix.extend_from_slice(v);
+    prefix
+}
+
 #[allow(dead_code)]
 pub fn aesvt_attr_prefix(a: AttributeId) -> Vec<u8> {
     a.to_be_bytes().to_vec()

@@ -345,7 +345,7 @@ fn query_benchmarks(c: &mut Criterion) {
         })
     });
     group.bench_function("tx_factoms", |b| {
-        b.iter(|| black_box(fixture.db.tx_factoms(fixture.latest_txn).unwrap()))
+        b.iter(|| black_box(fixture.db.tx_factoms(fixture.latest_txn).flatten()))
     });
     group.bench_function("entity_history", |b| {
         b.iter(|| {

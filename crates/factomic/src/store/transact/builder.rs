@@ -1,22 +1,32 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, HashSet},
+    sync::Arc,
+    time::SystemTime,
 };
 
-use fjall::OwnedWriteBatch;
+use fjall::{OwnedWriteBatch, Readable};
 use fractional_index::FractionalIndex;
+use itertools::Itertools;
 
-use crate::factom::{ASSERT, CollectionKind, MapKey, Op, RETRACT, Slot};
-use crate::id::{AttributeId, EntityId, TxnId};
 use crate::keys;
 use crate::primitive::{DecodePrimitive, EncodePrimitive};
 use crate::store::{AttributeDef, Store};
 use crate::value::{TAG_REF, Type, Value};
 use crate::{
+    Db,
+    id::{AttributeId, EntityId, TxnId},
+};
+use crate::{
+    Factom,
+    factom::{ASSERT, CollectionKind, MapKey, Op, RETRACT, Slot},
+};
+use crate::{
     error::{Error, Result},
     value,
 };
 
+use super::super::{by_attr_key, by_attr_value, by_name_key};
 use super::{FactomRef, check_key, check_type, ref_target};
 
 const EA_KEY_OFFSET: usize = size_of::<EntityId>() + size_of::<AttributeId>();
@@ -32,6 +42,7 @@ enum ListEnd {
     Back,
 }
 
+#[allow(dead_code)]
 enum PlannedOp {
     Raw {
         op: Op,
@@ -116,6 +127,18 @@ enum PlannedOp {
     Rebalance {
         entity: EntityId,
         attr: AttributeId,
+    },
+    RevertTo {
+        txn: TxnId,
+    },
+    RevertToTime {
+        time: SystemTime,
+    },
+    UndoTxn {
+        txn: TxnId,
+    },
+    UndoEntityLatest {
+        entity: EntityId,
     },
     RetractEntity {
         entity: EntityId,
@@ -527,6 +550,30 @@ impl<'a> Transaction<'a> {
         self.ops.push(PlannedOp::RetractEntity { entity });
         self
     }
+
+    pub fn revert_to(&mut self, txn: TxnId) -> &mut Self {
+        self.ops.push(PlannedOp::RevertTo { txn });
+        self
+    }
+
+    pub fn revert_to_time(&mut self, time: SystemTime) -> &mut Self {
+        self.ops.push(PlannedOp::RevertToTime { time });
+        self
+    }
+
+    /// Cherry-pick a committed transaction for undo.
+    /// This only reverses the operations in `txn` that are part of the current fact identity.
+    /// For point-in-time restoration of the entire store, use [revert_to](Transaction::revert_to) instead.
+    pub fn undo_txn(&mut self, txn: TxnId) -> &mut Self {
+        self.ops.push(PlannedOp::UndoTxn { txn });
+        self
+    }
+
+    pub fn undo_entity_latest(&mut self, entity: EntityId) -> &mut Self {
+        self.ops.push(PlannedOp::UndoEntityLatest { entity });
+        self
+    }
+
     // todo: mutex for single writer or rwlock when snapshots/query result cache (parking_lot?)
     pub fn commit(&mut self) -> Result<Option<TxnId>> {
         let store = self.store;
@@ -548,6 +595,17 @@ impl<'a> Transaction<'a> {
 
         for attribute_changes in changes.values() {
             write_attribute_changes(store, &mut batch, txn, attribute_changes)?;
+        }
+
+        for attr in &changes.attribute_removals {
+            let def = store.attribute_def(*attr)?;
+            batch.insert(
+                &store.attrs_h,
+                by_attr_key(*attr),
+                by_attr_value(store.db().attribute_declaration(*attr)?.1, &def),
+            );
+            batch.remove(&store.attrs, by_attr_key(*attr));
+            batch.remove(&store.attrs, by_name_key(&def.name));
         }
 
         store.record_tx_timestamp(&mut batch, txn);
@@ -676,6 +734,7 @@ impl AttributeChanges {
 struct TransactionChanges {
     by_attribute: BTreeMap<(EntityId, AttributeId), AttributeChanges>,
     reference_inserts: BTreeSet<Vec<u8>>,
+    attribute_removals: BTreeSet<AttributeId>,
 }
 
 impl TransactionChanges {
@@ -683,6 +742,7 @@ impl TransactionChanges {
         Self {
             by_attribute: BTreeMap::new(),
             reference_inserts: BTreeSet::new(),
+            attribute_removals: BTreeSet::new(),
         }
     }
 
@@ -697,6 +757,11 @@ impl TransactionChanges {
     fn is_empty(&self) -> bool {
         self.values()
             .all(|changes| changes.evictions.is_empty() && changes.inserts.is_empty())
+            && self.attribute_removals.is_empty()
+    }
+
+    fn remove_attribute(&mut self, attr: AttributeId) {
+        self.attribute_removals.insert(attr);
     }
 
     fn pending_attrs(&self, entity: EntityId) -> Vec<AttributeId> {
@@ -798,6 +863,7 @@ impl TransactionChanges {
 
 struct FactomState {
     slot: Slot,
+    /// [Value] as bytes
     region: Vec<u8>,
     txn: Option<TxnId>,
 }
@@ -880,13 +946,16 @@ fn contains_sorted_factom(factoms: &[FactomState], slot: &Slot, region: &[u8]) -
 fn find_slot_index(factoms: &[FactomState], slot: &Slot) -> std::result::Result<usize, usize> {
     factoms.binary_search_by(|factom| compare_slots(&factom.slot, slot))
 }
-
-fn visible_factoms(
+/// Returns a view of current assertions, which includes:
+/// - Already present assertions in the db that will not be evicted within the current transaction
+/// - Pending assertions within the current transaction
+fn visible_assertions(
     store: &Store,
     changes: &TransactionChanges,
     entity: EntityId,
     attr: AttributeId,
 ) -> Result<Vec<FactomState>> {
+    //todo: can this be iter?
     let pending = changes.get(entity, attr);
     let mut committed = store
         .easvt
@@ -930,6 +999,19 @@ fn visible_factoms(
     }
 
     Ok(factoms)
+}
+
+// All retractions staged in the current transaction.
+fn pending_evictions(
+    changes: &TransactionChanges,
+    entity: EntityId,
+    attr: AttributeId,
+) -> impl Iterator<Item = Result<FactomState>> + '_ {
+    changes
+        .get(entity, attr)
+        .into_iter()
+        .flat_map(|changes| changes.evictions.iter())
+        .map(|(key, txn)| decode_sv_key(key, Some(*txn)))
 }
 
 enum FactomVisibility {
@@ -1052,6 +1134,10 @@ fn plan_op(store: &Store, op: PlannedOp, changes: &mut TransactionChanges) -> Re
             to,
         } => plan_move(store, changes, entity, attr, from, to),
         PlannedOp::Rebalance { entity, attr } => plan_rebalance(store, changes, entity, attr),
+        PlannedOp::RevertTo { txn } => plan_revert_to(store, changes, txn),
+        PlannedOp::RevertToTime { time } => plan_revert_to_time(store, changes, time),
+        PlannedOp::UndoTxn { txn } => plan_revert_txn(store, changes, txn),
+        PlannedOp::UndoEntityLatest { entity } => plan_undo_entity_latest(store, changes, entity),
         PlannedOp::RetractEntity { entity } => {
             let mut visited = HashSet::new();
             plan_retract_entity(store, changes, entity, &mut visited)
@@ -1081,7 +1167,7 @@ fn plan_assert(
             changes.insert(entity, attr, slot, region)?;
         }
         CollectionKind::One | CollectionKind::List | CollectionKind::Map => {
-            let visible = visible_factoms(store, changes, entity, attr)?;
+            let visible = visible_assertions(store, changes, entity, attr)?;
             if contains_sorted_factom(&visible, &slot, &region) {
                 return Ok(());
             }
@@ -1124,7 +1210,7 @@ fn plan_remove(
     attr: AttributeId,
     slot: Slot,
 ) -> Result<()> {
-    let mut visible = visible_factoms(store, changes, entity, attr)?;
+    let mut visible = visible_assertions(store, changes, entity, attr)?;
     let Ok(index) = find_slot_index(&visible, &slot) else {
         return Ok(());
     };
@@ -1164,7 +1250,7 @@ fn plan_insert_at(
     if !matches!(anchor, Slot::Position(_)) {
         return Err(Error::MismatchedKey(def.name.clone()));
     }
-    let visible = visible_factoms(store, changes, entity, attr)?;
+    let visible = visible_assertions(store, changes, entity, attr)?;
     let Ok(anchor_index) = find_slot_index(&visible, anchor) else {
         return Err(Error::SlotNotFound(def.name.clone()));
     };
@@ -1198,7 +1284,7 @@ fn plan_move(
             return Err(Error::MismatchedKey(def.name.clone()));
         }
     }
-    let visible = visible_factoms(store, changes, entity, attr)?;
+    let visible = visible_assertions(store, changes, entity, attr)?;
     let Ok(index) = find_slot_index(&visible, &from) else {
         return Err(Error::SlotNotFound(def.name.clone()));
     };
@@ -1218,7 +1304,7 @@ fn plan_rebalance(
     if def.kind != CollectionKind::List {
         return Err(Error::MismatchedKey(def.name.clone()));
     }
-    let visible = visible_factoms(store, changes, entity, attr)?;
+    let visible = visible_assertions(store, changes, entity, attr)?;
     if visible.len() < 2 {
         return Ok(());
     }
@@ -1255,7 +1341,7 @@ fn plan_replace_many(
     }
 
     let replacements: BTreeSet<_> = regions.into_iter().collect();
-    let visible = visible_factoms(store, changes, entity, attr)?;
+    let visible = visible_assertions(store, changes, entity, attr)?;
     if visible.len() == replacements.len()
         && visible
             .iter()
@@ -1291,7 +1377,7 @@ fn plan_replace_list(
         check_component_owner(store, changes, &def, entity, attr, region)?;
     }
 
-    let visible = visible_factoms(store, changes, entity, attr)?;
+    let visible = visible_assertions(store, changes, entity, attr)?;
     let mut index = FractionalIndex::default();
     let mut replacements = Vec::with_capacity(regions.len());
     for region in regions {
@@ -1331,7 +1417,7 @@ fn plan_replace_list_at(
     if def.kind != CollectionKind::List {
         return Err(Error::MismatchedKey(def.name.clone()));
     }
-    let visible = visible_factoms(store, changes, entity, attr)?;
+    let visible = visible_assertions(store, changes, entity, attr)?;
     let Some(factom) = visible.get(ordinal) else {
         return Err(Error::SlotNotFound(def.name.clone()));
     };
@@ -1352,7 +1438,7 @@ fn plan_insert_list_at(
     if def.kind != CollectionKind::List {
         return Err(Error::MismatchedKey(def.name.clone()));
     }
-    let visible = visible_factoms(store, changes, entity, attr)?;
+    let visible = visible_assertions(store, changes, entity, attr)?;
     if ordinal > visible.len() {
         return Err(Error::SlotNotFound(def.name.clone()));
     }
@@ -1376,7 +1462,7 @@ fn plan_remove_list_at(
     if def.kind != CollectionKind::List {
         return Err(Error::MismatchedKey(def.name.clone()));
     }
-    let visible = visible_factoms(store, changes, entity, attr)?;
+    let visible = visible_assertions(store, changes, entity, attr)?;
     let Some(factom) = visible.get(ordinal) else {
         return Err(Error::SlotNotFound(def.name.clone()));
     };
@@ -1396,7 +1482,7 @@ fn plan_move_list_at(
     if def.kind != CollectionKind::List {
         return Err(Error::MismatchedKey(def.name.clone()));
     }
-    let visible = visible_factoms(store, changes, entity, attr)?;
+    let visible = visible_assertions(store, changes, entity, attr)?;
     let Some(factom) = visible.get(from_ordinal) else {
         return Err(Error::SlotNotFound(def.name.clone()));
     };
@@ -1448,7 +1534,7 @@ fn plan_replace_map(
         check_component_owner(store, changes, &def, entity, attr, region)?;
     }
 
-    let visible = visible_factoms(store, changes, entity, attr)?;
+    let visible = visible_assertions(store, changes, entity, attr)?;
     if visible.len() == replacements.len()
         && visible
             .iter()
@@ -1466,6 +1552,234 @@ fn plan_replace_map(
         changes.insert(entity, attr, slot, region)?;
     }
     Ok(())
+}
+
+fn plan_revert_to(store: &Store, changes: &mut TransactionChanges, txn: TxnId) -> Result<()> {
+    let db = store.db();
+    let mut operations = db.tx_factoms(txn).peekable();
+    if operations.peek().is_none() {
+        return Err(Error::UnknownTransaction(txn));
+    }
+
+    if db.txn() == txn {
+        return Ok(());
+    }
+    let past_db = db.at(txn);
+    let mut identities = BTreeSet::new();
+    for item in past_db.snapshot.iter(&past_db.easvt) {
+        let (key, _) = item.into_inner()?;
+        let (entity, attr, _, _) = keys::decode_easvt_key(&key)?;
+        identities.insert((entity, attr));
+    }
+
+    for item in past_db.snapshot.iter(&past_db.easvt_h) {
+        let (key, _) = item.into_inner()?;
+        let (entity, attr, _, _, _) = keys::decode_easvt_history_key(&key)?;
+        identities.insert((entity, attr));
+    }
+
+    for item in store.easvt.iter() {
+        let (key, _) = item.into_inner()?;
+        let (entity, attr, _, _) = keys::decode_easvt_key(&key)?;
+        identities.insert((entity, attr));
+    }
+
+    for item in db.attrs.iter() {
+        let (key, _) = item.into_inner()?;
+        if key[0] != super::super::BY_ATTR_PREFIX {
+            continue;
+        }
+
+        let id = AttributeId::try_from(&key[1..])?;
+        let (def, declared_at) = db.attribute_declaration(id)?;
+        if declared_at <= txn {
+            continue;
+        }
+
+        match past_db.named_attribute_def(&def.name)? {
+            Some(target_def) if target_def == def => {}
+            Some(_) => return Err(Error::SchemaConflict(def.name)),
+            None => changes.remove_attribute(id),
+        }
+    }
+
+    for (entity, attr) in identities {
+        let target = past_db
+            .entity_attr_factoms(entity, attr)
+            .collect::<Result<Vec<Factom>>>()?;
+
+        let latest = visible_assertions(store, changes, entity, attr)?;
+        let target_by_identity: BTreeMap<Vec<u8>, Factom> = target
+            .into_iter()
+            .map(|factom| (sv_key(factom.slot(), &factom.value().region()), factom))
+            .collect();
+
+        let latest_by_identity: BTreeMap<Vec<u8>, FactomState> = latest
+            .into_iter()
+            .map(|state| (sv_key(&state.slot, &state.region), state))
+            .collect();
+        let target_def = store.attribute_def(attr)?;
+
+        for (identity, target_factom) in &target_by_identity {
+            match latest_by_identity.get(identity) {
+                Some(current)
+                    if &current.slot == target_factom.slot()
+                        && current.region == target_factom.value().region() =>
+                {
+                    // skip, exists both past and present
+                }
+                Some(current) => {
+                    // changed between past and present
+                    plan_retract(
+                        store,
+                        changes,
+                        target_def.clone(),
+                        entity,
+                        attr,
+                        current.slot.clone(),
+                        current.region.clone(),
+                    )?;
+
+                    plan_assert(
+                        store,
+                        changes,
+                        target_def.clone(),
+                        entity,
+                        attr,
+                        target_factom.slot().clone(),
+                        target_factom.value().region(),
+                    )?;
+                }
+                None => {
+                    // exists in past but not in present
+                    plan_assert(
+                        store,
+                        changes,
+                        target_def.clone(),
+                        entity,
+                        attr,
+                        target_factom.slot().clone(),
+                        target_factom.value().region(),
+                    )?;
+                }
+            }
+        }
+
+        for (identity, current) in &latest_by_identity {
+            if !target_by_identity.contains_key(identity) {
+                // exists in present but not in past
+                plan_retract(
+                    store,
+                    changes,
+                    target_def.clone(),
+                    entity,
+                    attr,
+                    current.slot.clone(),
+                    current.region.clone(),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn plan_revert_to_time(
+    store: &Store,
+    changes: &mut TransactionChanges,
+    time: SystemTime,
+) -> Result<()> {
+    let Some(txn) = store.db().txn_at(time)? else {
+        return Err(Error::NoTransactionBeforeTimeError);
+    };
+    plan_revert_to(store, changes, txn)
+}
+
+fn revert_tx_factoms(
+    store: &Store,
+    db: &Arc<Db>,
+    changes: &mut TransactionChanges,
+    txn: TxnId,
+    tx_factoms: impl Iterator<Item = Result<Factom>>,
+) -> Result<()> {
+    for result in tx_factoms {
+        let factom = result?;
+        let entity = factom.entity();
+        let attr = factom.attribute();
+        let Some(latest) = db.latest_of_factom(&factom)? else {
+            continue;
+        };
+        let visible = visible_assertions(store, changes, entity, attr)?;
+        let has_pending_assertion = visible.iter().any(|state| {
+            state.txn.is_none()
+                && state.slot == *factom.slot()
+                && state.region == factom.value().region()
+        });
+        let region = factom.value().region();
+        let has_pending_retraction =
+            pending_evictions(changes, entity, attr).try_fold(false, |found, state| {
+                let state = state?;
+                Ok::<bool, crate::Error>(
+                    found || (state.slot == *factom.slot() && state.region == region),
+                )
+            })?;
+        let has_pending_operation = has_pending_assertion || has_pending_retraction;
+        if has_pending_operation || latest.txn() != txn || latest.op() != factom.op() {
+            continue;
+        }
+        let def = check_type(store, factom.attribute(), factom.value().value_type())?;
+        check_key(&def, factom.slot())?;
+
+        match factom.op() {
+            Op::Assert => plan_retract(
+                store,
+                changes,
+                def,
+                entity,
+                attr,
+                factom.slot().clone(),
+                region,
+            )?,
+            Op::Retract => plan_assert(
+                store,
+                changes,
+                def,
+                entity,
+                attr,
+                factom.slot().clone(),
+                region,
+            )?,
+        }
+    }
+    Ok(())
+}
+
+fn plan_revert_txn(store: &Store, changes: &mut TransactionChanges, txn: TxnId) -> Result<()> {
+    let db = store.db();
+    let mut tx_factoms = db.tx_factoms(txn).peekable();
+    if (tx_factoms.peek()).is_none() {
+        return Err(Error::UnknownTransaction(txn));
+    }
+    revert_tx_factoms(store, &db, changes, txn, tx_factoms)
+}
+
+fn plan_undo_entity_latest(
+    store: &Store,
+    changes: &mut TransactionChanges,
+    entity: EntityId,
+) -> Result<()> {
+    let Some(factom) = store.db().entity_latest_factom(entity)? else {
+        return Err(Error::NoTransactionBeforeTimeError);
+    };
+    let txn = factom.txn();
+    let db = store.db();
+    let mut tx_factoms = db
+        .tx_factoms(txn)
+        .filter_ok(|f| f.entity() == entity)
+        .peekable();
+    if (tx_factoms.peek()).is_none() {
+        return Err(Error::UnknownTransaction(txn));
+    };
+    revert_tx_factoms(store, &db, changes, txn, tx_factoms)
 }
 
 struct VisibleReference {
@@ -1601,7 +1915,7 @@ fn plan_append(
     if def.kind != CollectionKind::List {
         return Err(Error::MismatchedKey(def.name.clone()));
     }
-    let visible = visible_factoms(store, changes, entity, attr)?;
+    let visible = visible_assertions(store, changes, entity, attr)?;
     let slot = match end {
         ListEnd::Front => mint_between(None, visible.first().map(|factom| &factom.slot))?,
         ListEnd::Back => mint_between(visible.last().map(|factom| &factom.slot), None)?,
@@ -1633,6 +1947,8 @@ mod tests {
     use super::*;
     use crate::id::{TX_KIND_ATTR, TX_MOVE_ATTR};
     use crate::value::Value;
+    use itertools::Itertools;
+
     use tempfile::TempDir;
 
     fn temp_store() -> (TempDir, Store) {
@@ -1758,6 +2074,91 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn revert_to_restores_values_and_schema() {
+        let (dir, store) = temp_store();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let entity = store.new_entity().unwrap();
+        let first = store.assert(entity, name, &"alice").unwrap().unwrap();
+        let second = store.assert(entity, name, &"bob").unwrap().unwrap();
+        let age = store
+            .declare_attribute(def("person/age", Type::Long, CollectionKind::One))
+            .unwrap();
+        let fourth = store.assert(entity, age, &30_i64).unwrap().unwrap();
+
+        let restored = store.revert_to(second).unwrap().unwrap();
+        assert!(restored > fourth);
+        let db = store.db();
+        assert_eq!(
+            db.entity_value::<String>(entity, name).unwrap(),
+            Some("bob".into())
+        );
+        assert_eq!(db.entity_value::<i64>(entity, age).unwrap(), None);
+        assert_eq!(db.attribute_id("person/age").unwrap(), None);
+        assert_eq!(
+            db.at(fourth).entity_value::<i64>(entity, age).unwrap(),
+            Some(30)
+        );
+        assert_eq!(
+            db.at(second).entity_value::<String>(entity, name).unwrap(),
+            Some("bob".into())
+        );
+        assert_eq!(
+            db.at(first).entity_value::<String>(entity, name).unwrap(),
+            Some("alice".into())
+        );
+
+        drop(db);
+        drop(store);
+        let reopened = Store::open(dir.path()).unwrap();
+        assert_eq!(
+            reopened.db().entity_value::<String>(entity, name).unwrap(),
+            Some("bob".into())
+        );
+        assert_eq!(reopened.db().attribute_id("person/age").unwrap(), None);
+        reopened.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn revert_to_latest_is_noop() {
+        let (_dir, store) = temp_store();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let entity = store.new_entity().unwrap();
+        let txn = store.assert(entity, name, &"alice").unwrap().unwrap();
+
+        assert_eq!(store.revert_to(txn).unwrap(), None);
+        assert_eq!(store.db().txn(), txn);
+        assert_eq!(
+            store.db().entity_value::<String>(entity, name).unwrap(),
+            Some("alice".into())
+        );
+    }
+
+    #[test]
+    fn revert_to_declaration_is_noop() {
+        let (_dir, store) = temp_store();
+        let name = store
+            .declare_attribute(def("person/name", Type::String, CollectionKind::One))
+            .unwrap();
+        let declaration = store.db().txn();
+
+        assert_eq!(store.revert_to(declaration).unwrap(), None);
+        assert_eq!(store.db().txn(), declaration);
+        assert_eq!(store.db().attribute_id("person/name").unwrap(), Some(name));
+    }
+
+    #[test]
+    fn revert_to_unknown_transaction_errors() {
+        let (_dir, store) = temp_store();
+        let result = store.revert_to(TxnId::with_value(999));
+        assert!(matches!(result, Err(Error::UnknownTransaction(_))));
+        assert_eq!(store.db().txn(), TxnId::with_value(0));
     }
 
     #[test]
@@ -2248,7 +2649,7 @@ mod tests {
             .commit()
             .unwrap()
             .unwrap();
-        let log = store.db().tx_factoms(txn).unwrap();
+        let log = store.db().tx_factoms(txn).flatten().collect_vec();
         assert!(log.iter().all(|factom| factom.attribute() != TX_KIND_ATTR));
         let after = store
             .db()
@@ -2608,7 +3009,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let log = store.db().tx_factoms(txn).unwrap();
+        let log = store.db().tx_factoms(txn).flatten().collect_vec();
         assert!(log.iter().all(|factom| factom.attribute() != name));
         assert!(log.iter().any(|factom| factom.attribute() == nickname));
         let names = store
