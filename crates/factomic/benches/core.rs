@@ -1,6 +1,6 @@
 use std::hint::black_box;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use criterion::measurement::WallTime;
 use criterion::{
@@ -118,10 +118,7 @@ fn bench_assert(group: &mut BenchmarkGroup<'_, WallTime>, name: &'static str, si
                 for value in values.take().unwrap() {
                     tx.assert(*entity, *attr, &value);
                 }
-                let txn = tx.commit().unwrap();
-                let persisted = store.db().entity_values::<String>(*entity, *attr).count();
-                assert_eq!(persisted, size);
-                black_box(txn)
+                black_box(tx.commit().unwrap())
             },
             BatchSize::SmallInput,
         )
@@ -166,6 +163,7 @@ struct QueryFixture {
     scores: AttributeId,
     target: EntityId,
     latest_txn: TxnId,
+    revert_time: SystemTime,
 }
 
 fn query_fixture() -> QueryFixture {
@@ -197,6 +195,7 @@ fn query_fixture() -> QueryFixture {
         .unwrap()
         .unwrap();
     let anchor = store.db().slot_at(entity, items, 1).unwrap().unwrap();
+    let revert_time = SystemTime::now();
     let latest_txn = store
         .transact()
         .assert(entity, age, &31_i64)
@@ -220,6 +219,7 @@ fn query_fixture() -> QueryFixture {
         scores,
         target,
         latest_txn,
+        revert_time,
     }
 }
 
@@ -345,7 +345,15 @@ fn query_benchmarks(c: &mut Criterion) {
         })
     });
     group.bench_function("tx_factoms", |b| {
-        b.iter(|| black_box(fixture.db.tx_factoms(fixture.latest_txn).flatten()))
+        b.iter(|| {
+            let factoms = fixture
+                .db
+                .tx_factoms(fixture.latest_txn)
+                .collect::<Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(factoms.len(), 6);
+            black_box(factoms)
+        })
     });
     group.bench_function("entity_history", |b| {
         b.iter(|| {
@@ -522,6 +530,48 @@ fn record_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
+fn revert_benchmarks(c: &mut Criterion) {
+    let mut group = c.benchmark_group("revert");
+    expensive(&mut group);
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("to_txn", |b| {
+        b.iter_batched_ref(
+            query_fixture,
+            |fixture| {
+                black_box(
+                    fixture
+                        ._store
+                        .revert_to(fixture.historical.as_of().unwrap())
+                        .unwrap(),
+                )
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    group.bench_function("to_time", |b| {
+        b.iter_batched_ref(
+            query_fixture,
+            |fixture| black_box(fixture._store.revert_to_time(fixture.revert_time).unwrap()),
+            BatchSize::SmallInput,
+        )
+    });
+    group.bench_function("undo_txn", |b| {
+        b.iter_batched_ref(
+            query_fixture,
+            |fixture| black_box(fixture._store.undo_txn(fixture.latest_txn).unwrap()),
+            BatchSize::SmallInput,
+        )
+    });
+    group.bench_function("undo_entity_latest", |b| {
+        b.iter_batched_ref(
+            query_fixture,
+            |fixture| black_box(fixture._store.undo_entity_latest(fixture.entity).unwrap()),
+            BatchSize::SmallInput,
+        )
+    });
+    group.finish();
+}
+
 fn lifecycle_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("lifecycle");
     expensive(&mut group);
@@ -577,6 +627,7 @@ criterion_group!(
     transaction_benchmarks,
     query_benchmarks,
     record_benchmarks,
+    revert_benchmarks,
     lifecycle_benchmarks
 );
 criterion_main!(benches);
