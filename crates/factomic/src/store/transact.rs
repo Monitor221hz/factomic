@@ -9,19 +9,7 @@ use crate::id::{AttributeId, EntityId, TX_KIND_ATTR, TX_MOVE_ATTR, TX_TIMESTAMP_
 use crate::keys;
 use crate::primitive::{DecodePrimitive, EncodePrimitive};
 use crate::store::{AttributeDef, Store};
-use crate::value::{TAG_REF, Type, Value, region};
-
-fn check_type(store: &Store, attr: AttributeId, ty: Type) -> Result<AttributeDef> {
-    let def = store.attribute_def(attr)?;
-    if def.value_type != ty {
-        return Err(Error::TypeMismatch {
-            attribute: def.name.clone(),
-            expected: def.value_type,
-            got: ty,
-        });
-    }
-    Ok(def)
-}
+use crate::value::{TAG_REF, Value, region};
 
 fn ref_target(region: &[u8]) -> Result<Option<EntityId>> {
     if region[0] == TAG_REF {
@@ -449,7 +437,10 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::factom::{Factom, MapKey};
+    use crate::{
+        Type,
+        factom::{Factom, MapKey},
+    };
     use itertools::Itertools;
     use tempfile::TempDir;
 
