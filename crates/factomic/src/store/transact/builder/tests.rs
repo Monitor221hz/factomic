@@ -4,7 +4,9 @@ use crate::value::Value;
 use itertools::Itertools;
 
 use tempfile::TempDir;
-
+fn find_slot_index(factoms: &[FactomState], slot: &Slot) -> std::result::Result<usize, usize> {
+    factoms.binary_search_by(|factom| compare_slots(&factom.slot, slot))
+}
 fn temp_store() -> (TempDir, Store) {
     let dir = TempDir::new().unwrap();
     let store = Store::open(dir.path()).unwrap();

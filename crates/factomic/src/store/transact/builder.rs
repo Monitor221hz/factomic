@@ -963,75 +963,89 @@ fn contains_sorted_factom(factoms: &[FactomState], slot: &Slot, region: &[u8]) -
         .is_ok()
 }
 
-fn find_slot_index(factoms: &[FactomState], slot: &Slot) -> std::result::Result<usize, usize> {
-    factoms.binary_search_by(|factom| compare_slots(&factom.slot, slot))
+fn scan_slot_factom(
+    factoms: impl Iterator<Item = Result<FactomState>>,
+    slot: &Slot,
+) -> Result<Option<FactomState>> {
+    for factom in factoms {
+        let factom = factom?;
+
+        if compare_slots(&factom.slot, slot) == Ordering::Equal {
+            return Ok(Some(factom));
+        }
+    }
+    Ok(None)
 }
 /// Returns a view of current assertions, which includes:
 /// - Already present assertions in the db that will not be evicted within the current transaction
 /// - Pending assertions within the current transaction
-fn visible_assertions(
-    store: &Store,
-    changes: &TransactionChanges,
+fn visible_assertions<'a>(
+    store: &'a Store,
+    changes: &'a TransactionChanges,
     entity: EntityId,
     attr: AttributeId,
-) -> Result<Vec<FactomState>> {
-    //todo: can this be iter?
+) -> impl Iterator<Item = Result<FactomState>> + 'a {
     let pending = changes.get(entity, attr);
+
+    let committed_pending = pending;
+
     let mut committed = store
         .easvt
         .prefix(keys::easv_entity_attr_prefix(entity, attr))
-        .map(|guard| -> Result<Option<_>> {
+        .map(move |guard| -> Result<Option<_>> {
             let (key, payload) = guard.into_inner()?;
             let factom_key = &key[EA_KEY_OFFSET..];
-            if let Some(changes) = pending
+
+            if let Some(changes) = committed_pending
                 && changes.evictions.contains_key(factom_key)
             {
                 return Ok(None);
             }
+
             let txn = decode_txn(&payload);
             let factom = decode_sv_key(factom_key, Some(txn))?;
             Ok(Some((key, factom)))
         })
         .filter_map(|result| result.transpose())
         .peekable();
+
     let mut inserts = pending
         .into_iter()
         .flat_map(|changes| changes.inserts.iter())
         .peekable();
-    let mut factoms = Vec::new();
 
-    loop {
+    let mut finished = false;
+
+    std::iter::from_fn(move || {
+        if finished {
+            return None;
+        }
+
         let take_committed = match (committed.peek(), inserts.peek()) {
             (Some(Ok((key, _))), Some(insert_key)) => {
                 &key[EA_KEY_OFFSET..] <= insert_key.as_slice()
             }
+
             (Some(_), _) => true,
             (None, Some(_)) => false,
-            (None, None) => break,
+            (None, None) => {
+                finished = true;
+                return None;
+            }
         };
-        if take_committed {
-            let (_, factom) = committed.next().unwrap()?;
-            factoms.push(factom);
+
+        let next = if take_committed {
+            committed.next().unwrap().map(|(_, factom)| factom)
         } else {
-            let insert_key = inserts.next().unwrap();
-            factoms.push(decode_sv_key(insert_key, None)?);
+            decode_sv_key(inserts.next().unwrap(), None)
+        };
+
+        if next.is_err() {
+            finished = true;
         }
-    }
 
-    Ok(factoms)
-}
-
-// All retractions staged in the current transaction.
-fn pending_evictions(
-    changes: &TransactionChanges,
-    entity: EntityId,
-    attr: AttributeId,
-) -> impl Iterator<Item = Result<FactomState>> + '_ {
-    changes
-        .get(entity, attr)
-        .into_iter()
-        .flat_map(|changes| changes.evictions.iter())
-        .map(|(key, txn)| decode_sv_key(key, Some(*txn)))
+        Some(next)
+    })
 }
 
 enum FactomVisibility {
@@ -1187,7 +1201,8 @@ fn plan_assert(
             changes.insert(entity, attr, slot, region)?;
         }
         CollectionKind::One | CollectionKind::List | CollectionKind::Map => {
-            let visible = visible_assertions(store, changes, entity, attr)?;
+            let visible =
+                visible_assertions(store, changes, entity, attr).collect::<Result<Vec<_>>>()?;
             if contains_sorted_factom(&visible, &slot, &region) {
                 return Ok(());
             }
@@ -1230,12 +1245,13 @@ fn plan_remove(
     attr: AttributeId,
     slot: Slot,
 ) -> Result<()> {
-    let mut visible = visible_assertions(store, changes, entity, attr)?;
-    let Ok(index) = find_slot_index(&visible, &slot) else {
+    let Some(factom) = scan_slot_factom(visible_assertions(store, changes, entity, attr), &slot)?
+    else {
         return Ok(());
     };
+
     changes.ensure(def, entity, attr);
-    changes.evict(entity, attr, visible.swap_remove(index))
+    changes.evict(entity, attr, factom)
 }
 
 fn plan_clear(
@@ -1270,21 +1286,25 @@ fn plan_insert_at(
     if !matches!(anchor, Slot::Position(_)) {
         return Err(Error::MismatchedKey(def.name.clone()));
     }
-    let visible = visible_assertions(store, changes, entity, attr)?;
-    let Ok(anchor_index) = find_slot_index(&visible, anchor) else {
-        return Err(Error::SlotNotFound(def.name.clone()));
-    };
-    let (left, right) = match position {
-        InsertPosition::Before(_) => (anchor_index.checked_sub(1), Some(anchor_index)),
-        InsertPosition::After(_) => (Some(anchor_index), anchor_index.checked_add(1)),
-    };
-    let left = left.and_then(|index| visible.get(index));
-    let right = right.and_then(|index| visible.get(index));
-    let slot = mint_between(
-        left.map(|factom| &factom.slot),
-        right.map(|factom| &factom.slot),
-    )?;
-    plan_assert(store, changes, def, entity, attr, slot, region)
+    let mut visible = visible_assertions(store, changes, entity, attr);
+    let mut prev = None;
+    while let Some(result) = visible.next() {
+        let factom = result?;
+
+        if compare_slots(&factom.slot, anchor) == Ordering::Equal {
+            let (left, right) = match position {
+                InsertPosition::Before(_) => (prev, Some(factom)),
+                InsertPosition::After(_) => (Some(factom), visible.next().transpose()?),
+            };
+            let left = left.map(|factom| factom.slot);
+            let right = right.map(|factom| factom.slot);
+            drop(visible);
+            let slot = mint_between(left.as_ref(), right.as_ref())?;
+            return plan_assert(store, changes, def, entity, attr, slot, region);
+        }
+        prev = Some(factom);
+    }
+    Err(Error::SlotNotFound(def.name))
 }
 
 fn plan_move(
@@ -1304,11 +1324,11 @@ fn plan_move(
             return Err(Error::MismatchedKey(def.name.clone()));
         }
     }
-    let visible = visible_assertions(store, changes, entity, attr)?;
-    let Ok(index) = find_slot_index(&visible, &from) else {
+    let Some(factom) = scan_slot_factom(visible_assertions(store, changes, entity, attr), &from)?
+    else {
         return Err(Error::SlotNotFound(def.name.clone()));
     };
-    let region = visible[index].region.clone();
+    let region = factom.region.clone();
     plan_remove(store, changes, def.clone(), entity, attr, from)?;
     plan_assert(store, changes, def, entity, attr, to, region)
 }
@@ -1324,7 +1344,7 @@ fn plan_rebalance(
     if def.kind != CollectionKind::List {
         return Err(Error::MismatchedKey(def.name.clone()));
     }
-    let visible = visible_assertions(store, changes, entity, attr)?;
+    let visible = visible_assertions(store, changes, entity, attr).collect::<Result<Vec<_>>>()?;
     if visible.len() < 2 {
         return Ok(());
     }
@@ -1361,7 +1381,7 @@ fn plan_replace_many(
     }
 
     let replacements: BTreeSet<_> = regions.into_iter().collect();
-    let visible = visible_assertions(store, changes, entity, attr)?;
+    let visible = visible_assertions(store, changes, entity, attr).collect::<Result<Vec<_>>>()?;
     if visible.len() == replacements.len()
         && visible
             .iter()
@@ -1397,7 +1417,7 @@ fn plan_replace_list(
         check_component_owner(store, changes, &def, entity, attr, region)?;
     }
 
-    let visible = visible_assertions(store, changes, entity, attr)?;
+    let visible = visible_assertions(store, changes, entity, attr).collect::<Result<Vec<_>>>()?;
     let mut index = FractionalIndex::default();
     let mut replacements = Vec::with_capacity(regions.len());
     for region in regions {
@@ -1437,9 +1457,13 @@ fn plan_replace_list_at(
     if def.kind != CollectionKind::List {
         return Err(Error::MismatchedKey(def.name));
     }
-    let visible = visible_assertions(store, changes, entity, attr)?;
-    let Some(factom) = visible.get(ordinal) else {
-        return Err(Error::SlotNotFound(def.name.clone()));
+    let factom = itertools::process_results(
+        visible_assertions(store, changes, entity, attr),
+        |mut visible| visible.nth(ordinal),
+    )?;
+
+    let Some(factom) = factom else {
+        return Err(Error::SlotNotFound(def.name));
     };
     let slot = factom.slot.clone();
     plan_assert(store, changes, def, entity, attr, slot, region)
@@ -1458,16 +1482,34 @@ fn plan_insert_list_at(
     if def.kind != CollectionKind::List {
         return Err(Error::MismatchedKey(def.name));
     }
-    let visible = visible_assertions(store, changes, entity, attr)?;
-    if ordinal > visible.len() {
-        return Err(Error::SlotNotFound(def.name.clone()));
-    }
-    let left = ordinal.checked_sub(1).and_then(|index| visible.get(index));
-    let right = visible.get(ordinal);
-    let slot = mint_between(
-        left.map(|factom| &factom.slot),
-        right.map(|factom| &factom.slot),
+    let sub_ordinal = ordinal.checked_sub(1);
+
+    let (left, right) = itertools::process_results(
+        visible_assertions(store, changes, entity, attr),
+        |visible| {
+            let mut immediate = visible
+                .enumerate()
+                .skip_while(|(index, _)| sub_ordinal.is_some_and(|ordinal| *index < ordinal));
+
+            let left = sub_ordinal
+                .and_then(|_| immediate.next())
+                .map(|(_, factom)| factom);
+
+            let right = immediate.next().map(|(_, factom)| factom);
+
+            (left, right)
+        },
     )?;
+
+    if ordinal > 0 && left.is_none() {
+        return Err(Error::SlotNotFound(def.name));
+    }
+
+    let slot = mint_between(
+        left.as_ref().map(|factom| &factom.slot),
+        right.as_ref().map(|factom| &factom.slot),
+    )?;
+
     plan_assert(store, changes, def, entity, attr, slot, region)
 }
 
@@ -1482,9 +1524,13 @@ fn plan_remove_list_at(
     if def.kind != CollectionKind::List {
         return Err(Error::MismatchedKey(def.name.clone()));
     }
-    let visible = visible_assertions(store, changes, entity, attr)?;
-    let Some(factom) = visible.get(ordinal) else {
-        return Err(Error::SlotNotFound(def.name.clone()));
+    let factom = itertools::process_results(
+        visible_assertions(store, changes, entity, attr),
+        |mut visible| visible.nth(ordinal),
+    )?;
+
+    let Some(factom) = factom else {
+        return Err(Error::SlotNotFound(def.name));
     };
     let slot = factom.slot.clone();
     plan_remove(store, changes, def, entity, attr, slot)
@@ -1502,7 +1548,7 @@ fn plan_move_list_at(
     if def.kind != CollectionKind::List {
         return Err(Error::MismatchedKey(def.name.clone()));
     }
-    let visible = visible_assertions(store, changes, entity, attr)?;
+    let visible = visible_assertions(store, changes, entity, attr).collect::<Result<Vec<_>>>()?;
     let Some(factom) = visible.get(from_ordinal) else {
         return Err(Error::SlotNotFound(def.name.clone()));
     };
@@ -1554,7 +1600,7 @@ fn plan_replace_map(
         check_component_owner(store, changes, &def, entity, attr, region)?;
     }
 
-    let visible = visible_assertions(store, changes, entity, attr)?;
+    let visible = visible_assertions(store, changes, entity, attr).collect::<Result<Vec<_>>>()?;
     if visible.len() == replacements.len()
         && visible
             .iter()
@@ -1628,16 +1674,15 @@ fn plan_revert_to(store: &Store, changes: &mut TransactionChanges, txn: TxnId) -
             .entity_attr_factoms(entity, attr)
             .collect::<Result<Vec<Factom>>>()?;
 
-        let latest = visible_assertions(store, changes, entity, attr)?;
         let target_by_identity: BTreeMap<Vec<u8>, Factom> = target
             .into_iter()
             .map(|factom| (sv_key(factom.slot(), &factom.value().region()), factom))
             .collect();
 
-        let latest_by_identity: BTreeMap<Vec<u8>, FactomState> = latest
-            .into_iter()
-            .map(|state| (sv_key(&state.slot, &state.region), state))
-            .collect();
+        let latest_by_identity: BTreeMap<Vec<u8>, FactomState> =
+            visible_assertions(store, changes, entity, attr)
+                .map_ok(|state| (sv_key(&state.slot, &state.region), state))
+                .collect::<Result<BTreeMap<_, _>>>()?;
         let target_def = store.attribute_def(attr)?;
 
         for (identity, target_factom) in &target_by_identity {
@@ -1728,22 +1773,17 @@ fn revert_tx_factoms(
         let Some(latest) = db.latest_of_factom(&factom)? else {
             continue;
         };
-        let visible = visible_assertions(store, changes, entity, attr)?;
-        let has_pending_assertion = visible.iter().any(|state| {
-            state.txn.is_none()
-                && state.slot == *factom.slot()
-                && state.region == factom.value().region()
-        });
+        if latest.txn() != txn || latest.op() != factom.op() {
+            continue;
+        }
         let region = factom.value().region();
-        let has_pending_retraction =
-            pending_evictions(changes, entity, attr).try_fold(false, |found, state| {
-                let state = state?;
-                Ok::<bool, crate::Error>(
-                    found || (state.slot == *factom.slot() && state.region == region),
-                )
-            })?;
-        let has_pending_operation = has_pending_assertion || has_pending_retraction;
-        if has_pending_operation || latest.txn() != txn || latest.op() != factom.op() {
+        let identity = sv_key(factom.slot(), &region);
+
+        let has_pending_operation = changes.get(entity, attr).is_some_and(|pending| {
+            pending.inserts.contains(&identity) || pending.evictions.contains_key(&identity)
+        });
+
+        if has_pending_operation {
             continue;
         }
         let def = changes.check_type(store, factom.attribute(), factom.value().value_type())?;
@@ -1935,10 +1975,20 @@ fn plan_append(
     if def.kind != CollectionKind::List {
         return Err(Error::MismatchedKey(def.name));
     }
-    let visible = visible_assertions(store, changes, entity, attr)?;
     let slot = match end {
-        ListEnd::Front => mint_between(None, visible.first().map(|factom| &factom.slot))?,
-        ListEnd::Back => mint_between(visible.last().map(|factom| &factom.slot), None)?,
+        ListEnd::Front => {
+            let first = visible_assertions(store, changes, entity, attr)
+                .next()
+                .transpose()?;
+            mint_between(None, first.as_ref().map(|factom| &factom.slot))?
+        }
+        ListEnd::Back => {
+            let last = itertools::process_results(
+                visible_assertions(store, changes, entity, attr),
+                |visible| visible.last(),
+            )?;
+            mint_between(last.as_ref().map(|factom| &factom.slot), None)?
+        }
     };
     plan_assert(store, changes, def, entity, attr, slot, region)
 }
