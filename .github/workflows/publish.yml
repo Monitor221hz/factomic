@@ -55,7 +55,7 @@ jobs:
                   true
                 end)
             '
-      - run: cargo test --workspace --all-features
+      - run: cargo test --workspace --exclude factomic-benches --all-features
       - run: cargo publish --dry-run --workspace
       - if: github.event.inputs.dry_run != 'true'
         run: cargo publish --workspace --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"

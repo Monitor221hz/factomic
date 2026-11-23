@@ -80,15 +80,15 @@ cargo run -p factomic-example
 
 ## Benchmarking
 
-Run the Criterion benchmarks with `cargo bench -p factomic`, or compile them without running using `cargo bench -p factomic --no-run`.
+Run the Criterion benchmarks with `cargo bench -p factomic-benches`, or compile them without running using `cargo bench -p factomic-benches --no-run`.
 
 Reports are written to `target/criterion/report/index.html`. 
 
 Save and compare baselines with:
 
 ```text
-cargo bench -p factomic -- --save-baseline main
-cargo bench -p factomic -- --baseline main
+cargo bench -p factomic-benches -- --save-baseline main
+cargo bench -p factomic-benches -- --baseline main
 ```
 
 ### Latest measured results
@@ -145,7 +145,7 @@ It should be noted that Factomic writes also include indexes, history, and trans
 
 ## Database comparisons
 
-Run `cargo bench -p factomic --bench compare` for strict-durability comparisons.
+Run `cargo bench -p factomic-benches --bench compare` for strict-durability comparisons.
 
 Comparisons use fjall `SyncAll`, redb/native_db `Immediate`, SQLite WAL with `synchronous=FULL`, and normal durable LMDB commits.
 

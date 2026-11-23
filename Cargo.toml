@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/factomic", "crates/factomic-derive", "crates/factomic-example"]
+members = [
+    "crates/factomic",
+    "crates/factomic-benches",
+    "crates/factomic-derive",
+    "crates/factomic-example",
+]
 
 [workspace.package]
 edition = "2024"

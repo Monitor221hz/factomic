@@ -1,6 +1,6 @@
 [package]
 name = "factomic"
-version = "0.3.0"
+version = "0.3.1"
 description = "Unitemporal, embedded fact database backed by fjall with typed entity handles and ordered list operations."
 edition.workspace = true
 rust-version.workspace = true
@@ -13,7 +13,7 @@ default = ["derive"]
 derive = ["dep:factomic-derive"]
 
 [dependencies]
-factomic-derive = { path = "../factomic-derive", version = "0.3.0", optional = true }
+factomic-derive = { path = "../factomic-derive", version = "0.3.1", optional = true }
 fjall.workspace = true
 thiserror.workspace = true
 jiff.workspace = true
@@ -23,22 +23,5 @@ arc-swap.workspace = true
 itertools.workspace = true
 
 [dev-dependencies]
-criterion = "0.8"
-heed = "0.23.1"
-native_db = "0.8.2"
-native_model = "0.4.20"
-redb = "5.0"
-rusqlite = { version = "0.43", features = ["bundled"] }
-serde = { version = "1", features = ["derive"] }
 tempfile = "3"
 trybuild = "1"
-
-[[bench]]
-name = "core"
-path = "benches/core.rs"
-harness = false
-
-[[bench]]
-name = "compare"
-path = "benches/compare.rs"
-harness = false

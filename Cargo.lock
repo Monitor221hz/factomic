@@ -376,30 +376,39 @@ dependencies = [
 
 [[package]]
 name = "factomic"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "arc-swap",
- "criterion",
  "factomic-derive",
  "fjall",
  "fractional_index",
- "heed",
  "itertools 0.15.0",
  "jiff",
- "native_db",
- "native_model",
  "parking_lot",
- "redb 5.0.0",
- "rusqlite",
- "serde",
  "tempfile",
  "thiserror 2.0.21",
  "trybuild",
 ]
 
 [[package]]
+name = "factomic-benches"
+version = "0.3.1"
+dependencies = [
+ "criterion",
+ "factomic",
+ "fjall",
+ "heed",
+ "native_db",
+ "native_model",
+ "redb 5.0.0",
+ "rusqlite",
+ "serde",
+ "tempfile",
+]
+
+[[package]]
 name = "factomic-derive"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "heck",
  "proc-macro-crate",

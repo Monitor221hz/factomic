@@ -1,0 +1,31 @@
+[package]
+name = "factomic-benches"
+version = "0.3.1"
+description = "Criterion benchmarks for factomic"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dev-dependencies]
+criterion = "0.8"
+factomic = { path = "../factomic" }
+fjall.workspace = true
+heed = "0.23.1"
+native_db = "0.8.2"
+native_model = "0.4.20"
+redb = "5.0"
+rusqlite = { version = "0.43", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+
+[[bench]]
+name = "core"
+path = "benches/core.rs"
+harness = false
+
+[[bench]]
+name = "compare"
+path = "benches/compare.rs"
+harness = false
