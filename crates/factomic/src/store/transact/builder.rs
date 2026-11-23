@@ -1201,17 +1201,19 @@ fn plan_assert(
             changes.insert(entity, attr, slot, region)?;
         }
         CollectionKind::One | CollectionKind::List | CollectionKind::Map => {
-            let visible =
-                visible_assertions(store, changes, entity, attr).collect::<Result<Vec<_>>>()?;
-            if contains_sorted_factom(&visible, &slot, &region) {
+            let replace_all = def.kind == CollectionKind::One;
+            let evictions = visible_assertions(store, changes, entity, attr)
+                .filter(|factom| match factom {
+                    Ok(factom) => replace_all || factom.slot == slot,
+                    Err(_) => true,
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if contains_sorted_factom(&evictions, &slot, &region) {
                 return Ok(());
             }
-            let replace_all = def.kind == CollectionKind::One;
             changes.ensure(def, entity, attr);
-            for factom in visible {
-                if replace_all || factom.slot == slot {
-                    changes.evict(entity, attr, factom)?;
-                }
+            for factom in evictions {
+                changes.evict(entity, attr, factom)?;
             }
             changes.insert(entity, attr, slot, region)?;
         }
@@ -1266,6 +1268,21 @@ fn plan_clear(
     }
     plan_remove(store, changes, def, entity, attr, Slot::Empty)
 }
+/// [mint_between] creates a new slot that is a unique fractional index. Therefore a brand new slot never needs collision checking within the same transaction.
+/// Do not use this for known slots!!!!
+fn plan_insert_new(
+    store: &Store,
+    changes: &mut TransactionChanges,
+    def: AttributeDef,
+    entity: EntityId,
+    attr: AttributeId,
+    slot: Slot,
+    region: Vec<u8>,
+) -> Result<()> {
+    check_component_owner(store, changes, &def, entity, attr, &region)?;
+    changes.ensure(def, entity, attr);
+    changes.insert(entity, attr, slot, region)
+}
 
 fn plan_insert_at(
     store: &Store,
@@ -1300,13 +1317,13 @@ fn plan_insert_at(
             let right = right.map(|factom| factom.slot);
             drop(visible);
             let slot = mint_between(left.as_ref(), right.as_ref())?;
-            return plan_assert(store, changes, def, entity, attr, slot, region);
+            return plan_insert_new(store, changes, def, entity, attr, slot, region);
         }
         prev = Some(factom);
     }
     Err(Error::SlotNotFound(def.name))
 }
-
+//todo: optimize, 3 scans too many
 fn plan_move(
     store: &Store,
     changes: &mut TransactionChanges,
@@ -1457,16 +1474,22 @@ fn plan_replace_list_at(
     if def.kind != CollectionKind::List {
         return Err(Error::MismatchedKey(def.name));
     }
-    let factom = itertools::process_results(
+    let old_factom = itertools::process_results(
         visible_assertions(store, changes, entity, attr),
         |mut visible| visible.nth(ordinal),
     )?;
 
-    let Some(factom) = factom else {
+    let Some(old_factom) = old_factom else {
         return Err(Error::SlotNotFound(def.name));
     };
-    let slot = factom.slot.clone();
-    plan_assert(store, changes, def, entity, attr, slot, region)
+    let slot = old_factom.slot.clone();
+    check_component_owner(store, changes, &def, entity, attr, &region)?;
+    if old_factom.region == region {
+        return Ok(());
+    }
+    changes.ensure(def, entity, attr);
+    changes.evict(entity, attr, old_factom)?;
+    changes.insert(entity, attr, slot, region)
 }
 
 fn plan_insert_list_at(
@@ -1510,7 +1533,7 @@ fn plan_insert_list_at(
         right.as_ref().map(|factom| &factom.slot),
     )?;
 
-    plan_assert(store, changes, def, entity, attr, slot, region)
+    plan_insert_new(store, changes, def, entity, attr, slot, region)
 }
 
 fn plan_remove_list_at(
@@ -1532,8 +1555,8 @@ fn plan_remove_list_at(
     let Some(factom) = factom else {
         return Err(Error::SlotNotFound(def.name));
     };
-    let slot = factom.slot.clone();
-    plan_remove(store, changes, def, entity, attr, slot)
+    changes.ensure(def, entity, attr);
+    changes.evict(entity, attr, factom)
 }
 
 fn plan_move_list_at(
@@ -1548,30 +1571,34 @@ fn plan_move_list_at(
     if def.kind != CollectionKind::List {
         return Err(Error::MismatchedKey(def.name.clone()));
     }
-    let visible = visible_assertions(store, changes, entity, attr).collect::<Result<Vec<_>>>()?;
-    let Some(factom) = visible.get(from_ordinal) else {
-        return Err(Error::SlotNotFound(def.name.clone()));
-    };
+    let mut visible =
+        visible_assertions(store, changes, entity, attr).collect::<Result<Vec<_>>>()?;
+
     if to_ordinal >= visible.len() {
         return Err(Error::SlotNotFound(def.name.clone()));
     }
     if from_ordinal == to_ordinal {
         return Ok(());
     }
-    let region = factom.region.clone();
-    let from_slot = factom.slot.clone();
-    let mut remaining = visible;
-    remaining.remove(from_ordinal);
+
+    let source = visible.remove(from_ordinal);
+
     let left = to_ordinal
         .checked_sub(1)
-        .and_then(|index| remaining.get(index));
-    let right = remaining.get(to_ordinal);
+        .and_then(|index| visible.get(index));
+    let right = visible.get(to_ordinal);
+
     let to_slot = mint_between(
         left.map(|factom| &factom.slot),
         right.map(|factom| &factom.slot),
     )?;
-    plan_remove(store, changes, def.clone(), entity, attr, from_slot)?;
-    plan_assert(store, changes, def, entity, attr, to_slot, region)
+
+    let source_region = source.region.clone();
+
+    changes.ensure(def.clone(), entity, attr);
+    changes.evict(entity, attr, source)?;
+
+    plan_insert_new(store, changes, def, entity, attr, to_slot, source_region)
 }
 
 fn plan_replace_map(
@@ -1990,7 +2017,7 @@ fn plan_append(
             mint_between(last.as_ref().map(|factom| &factom.slot), None)?
         }
     };
-    plan_assert(store, changes, def, entity, attr, slot, region)
+    plan_insert_new(store, changes, def, entity, attr, slot, region)
 }
 
 fn mint_between(left: Option<&Slot>, right: Option<&Slot>) -> Result<Slot> {
