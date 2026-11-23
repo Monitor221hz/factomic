@@ -573,8 +573,7 @@ impl<'a> Transaction<'a> {
         self.ops.push(PlannedOp::UndoEntityLatest { entity });
         self
     }
-
-    // todo: mutex for single writer or rwlock when snapshots/query result cache (parking_lot?)
+    // todo: group commits? (share 1 fsync)
     pub fn commit(&mut self) -> Result<Option<TxnId>> {
         let store = self.store;
         let ops = std::mem::take(&mut self.ops);

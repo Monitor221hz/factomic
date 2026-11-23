@@ -415,7 +415,6 @@ mod tests {
     }
 
     impl PersonEntity for DbHandle<Person> {
-        //to-do: realize() fn to create Person?
         fn name(&self) -> Result<Option<String>> {
             self.db.entity_value(self.entity, self.schema.name)
         }

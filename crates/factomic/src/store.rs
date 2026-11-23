@@ -88,7 +88,7 @@ pub struct Db {
     avest_h: Keyspace,
     vaest_h: Keyspace,
     txlog: Keyspace,
-} //todo: multi reader/single writer affirming tests
+}
 
 impl Db {
     /// Returns a read-only view of this database as it existed at the moment after `txn` was appended.
@@ -574,6 +574,7 @@ impl Store {
     }
 
     fn alloc_entity_id(&self, partition: u8) -> Result<EntityId> {
+        // todo: bulk id allocation, same-batch counter update
         let key = [META_ENTITY_PREFIX, partition];
         let counter = self
             .meta
