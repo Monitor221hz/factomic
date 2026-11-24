@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 
-use crate::{TxnId, value::Type};
+use crate::{EntityId, TxnId, value::Type};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -9,6 +9,9 @@ pub enum Error {
 
     #[error("unknown attribute: {0}")]
     UnknownAttribute(String),
+
+    #[error("missing value for entity {entity:?} attribute {attribute}")]
+    MissingValue { entity: EntityId, attribute: String },
 
     #[error("unknown transaction: {0:?}")]
     UnknownTransaction(TxnId),

@@ -143,13 +143,25 @@ fn expand_read_field(field: &Field) -> (TokenStream, TokenStream) {
     match &field.kind {
         FieldKind::One { cell, .. } => {
             let output = output_type(cell);
+            let required_ident = derived_ident("require_", ident, "");
+            let name = LitStr::new(&field.name, Span::call_site());
             let query = quote!(self.db.entity_value(self.entity, self.schema.#ident));
             let body = read_one_body(cell, query);
             (
-                quote!(fn #ident(&self) -> ::factomic::Result<::core::option::Option<#output>>;),
+                quote! {
+                    fn #ident(&self) -> ::factomic::Result<::core::option::Option<#output>>;
+                    fn #required_ident(&self) -> ::factomic::Result<#output>;
+                },
                 quote! {
                     fn #ident(&self) -> ::factomic::Result<::core::option::Option<#output>> {
                         #body
+                    }
+
+                    fn #required_ident(&self) -> ::factomic::Result<#output> {
+                        self.#ident()?.ok_or_else(|| ::factomic::Error::MissingValue {
+                            entity: self.entity,
+                            attribute: ::std::string::String::from(#name),
+                        })
                     }
                 },
             )
@@ -160,6 +172,8 @@ fn expand_read_field(field: &Field) -> (TokenStream, TokenStream) {
             let body = read_many_body(cell);
             let at = if matches!(field.kind, FieldKind::List(_)) {
                 let at_ident = derived_ident("", ident, "_at");
+                let required_at_ident = derived_ident("require_", ident, "_at");
+                let name = LitStr::new(&field.name, Span::call_site());
                 let query = quote!(self.db.entity_value_at::<#raw>(
                     self.entity,
                     self.schema.#ident,
@@ -172,6 +186,10 @@ fn expand_read_field(field: &Field) -> (TokenStream, TokenStream) {
                             &self,
                             ordinal: ::core::primitive::usize,
                         ) -> ::factomic::Result<::core::option::Option<#output>>;
+                        fn #required_at_ident(
+                            &self,
+                            ordinal: ::core::primitive::usize,
+                        ) -> ::factomic::Result<#output>;
                     },
                     quote! {
                         fn #at_ident(
@@ -179,6 +197,18 @@ fn expand_read_field(field: &Field) -> (TokenStream, TokenStream) {
                             ordinal: ::core::primitive::usize,
                         ) -> ::factomic::Result<::core::option::Option<#output>> {
                             #at_body
+                        }
+
+                        fn #required_at_ident(
+                            &self,
+                            ordinal: ::core::primitive::usize,
+                        ) -> ::factomic::Result<#output> {
+                            self.#at_ident(ordinal)?.ok_or_else(|| {
+                                ::factomic::Error::MissingValue {
+                                    entity: self.entity,
+                                    attribute: ::std::string::String::from(#name),
+                                }
+                            })
                         }
                     },
                 )
@@ -207,6 +237,8 @@ fn expand_read_field(field: &Field) -> (TokenStream, TokenStream) {
             let raw_value = raw_type(value);
             let body = read_map_body(key, value);
             let seek_ident = derived_ident("", ident, "_seek");
+            let required_seek_ident = derived_ident("require_", ident, "_seek");
+            let name = LitStr::new(&field.name, Span::call_site());
             let key_input = map_key_input(key, false);
             let key_expr = map_key_query(key);
             let query = quote!(self.db.entity_keyvalue::<#raw_value>(
@@ -224,6 +256,10 @@ fn expand_read_field(field: &Field) -> (TokenStream, TokenStream) {
                         &self,
                         key: #key_input,
                     ) -> ::factomic::Result<::core::option::Option<#value_output>>;
+                    fn #required_seek_ident(
+                        &self,
+                        key: #key_input,
+                    ) -> ::factomic::Result<#value_output>;
                 },
                 quote! {
                     fn #ident(
@@ -241,6 +277,18 @@ fn expand_read_field(field: &Field) -> (TokenStream, TokenStream) {
                         key: #key_input,
                     ) -> ::factomic::Result<::core::option::Option<#value_output>> {
                         #seek_body
+                    }
+
+                    fn #required_seek_ident(
+                        &self,
+                        key: #key_input,
+                    ) -> ::factomic::Result<#value_output> {
+                        self.#seek_ident(key)?.ok_or_else(|| {
+                            ::factomic::Error::MissingValue {
+                                entity: self.entity,
+                                attribute: ::std::string::String::from(#name),
+                            }
+                        })
                     }
                 },
             )

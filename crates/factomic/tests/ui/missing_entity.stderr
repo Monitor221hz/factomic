@@ -43,3 +43,26 @@ note: required by a bound in `DbHandle`
   | pub struct DbHandle<T: Entity> {
   |                        ^^^^^^ required by this bound in `DbHandle`
   = note: this error originates in the derive macro `factomic::Entity` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `Car: Entity` is not satisfied
+ --> tests/ui/missing_entity.rs:3:5
+  |
+3 |     car: Car,
+  |     ^^^ unsatisfied trait bound
+  |
+help: the trait `Entity` is not implemented for `Car`
+ --> tests/ui/missing_entity.rs:6:1
+  |
+6 | struct Car;
+  | ^^^^^^^^^^
+help: the trait `Entity` is implemented for `Model`
+ --> tests/ui/missing_entity.rs:1:10
+  |
+1 | #[derive(factomic::Entity)]
+  |          ^^^^^^^^^^^^^^^^
+note: required by a bound in `DbHandle`
+ --> src/schema.rs
+  |
+  | pub struct DbHandle<T: Entity> {
+  |                        ^^^^^^ required by this bound in `DbHandle`
+  = note: this error originates in the derive macro `factomic::Entity` (in Nightly builds, run with -Z macro-backtrace for more info)

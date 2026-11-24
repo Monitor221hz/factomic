@@ -4,6 +4,12 @@ error: duplicate generated read method `values_at`
 4 |     values_at: String,
   |     ^^^^^^^^^
 
+error: duplicate generated read method `require_values_at`
+ --> tests/ui/duplicate_list_method.rs:4:5
+  |
+4 |     values_at: String,
+  |     ^^^^^^^^^
+
 error: duplicate generated mutation method `set_values_at`
  --> tests/ui/duplicate_list_method.rs:4:5
   |

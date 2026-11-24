@@ -25,6 +25,7 @@ The derive feature is enabled by default. It generates the schema, `Entity` and 
 - `Option<T>` and `HashMap<K, Option<V>>` use absence and key removal for optional values.
 - `Arc<T>` and direct custom entity types map to references.
 - `#[factomic(indexed)]` enables exact indexed finders; reference fields also support reverse-reference finders.
+- Every getter returning `Result<Option<T>>` has a `require_` variant returning `Result<T>` and reporting `Error::MissingValue` when absent: `require_field()`, `require_field_at()`, and `require_field_seek()`.
 - `#[factomic(namespace = "...")]`, `#[factomic(name = "...")]`, `#[factomic(component)]`, `#[factomic(value)]`, and `#[factomic(ref)]` customize schema and type behavior.
 - `#[factomic(value)]` supports concrete custom value types, including generic types such as `chrono::DateTime<Utc>` when their primitive traits are implemented.
 

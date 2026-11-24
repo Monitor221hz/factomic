@@ -1,0 +1,5 @@
+error: duplicate generated read method `require_name`
+ --> tests/ui/duplicate_required_getter.rs:4:5
+  |
+4 |     require_name: String,
+  |     ^^^^^^^^^^^^

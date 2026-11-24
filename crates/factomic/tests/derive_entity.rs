@@ -53,6 +53,14 @@ struct Incremental {
 }
 
 #[derive(factomic::Entity)]
+struct RequiredValues {
+    name: String,
+    values: Vec<String>,
+    scores: HashMap<String, i64>,
+    target: Car,
+}
+
+#[derive(factomic::Entity)]
 #[factomic(namespace = "registry")]
 struct Registry {
     enabled: bool,
@@ -279,6 +287,72 @@ fn temp_store() -> (TempDir, Arc<Store>) {
     let dir = TempDir::new().unwrap();
     let store = Arc::new(Store::open(dir.path()).unwrap());
     (dir, store)
+}
+
+fn assert_missing<T>(result: Result<T>, entity: EntityId, attribute: &str) {
+    match result {
+        Err(Error::MissingValue {
+            entity: actual_entity,
+            attribute: actual_attribute,
+        }) => {
+            assert_eq!(actual_entity, entity);
+            assert_eq!(actual_attribute, attribute);
+        }
+        _ => panic!("expected missing value for {attribute}"),
+    }
+}
+
+#[test]
+fn required_getters_return_values_or_missing_errors() -> Result<()> {
+    let (_dir, store) = temp_store();
+    CarSchema::declare(&store)?;
+    RequiredValuesSchema::declare(&store)?;
+    let target = store.create::<Car>()?;
+    target.transact().set_name("target").commit()?;
+    let model = store.create::<RequiredValues>()?;
+
+    let current = model.read();
+    assert_missing(current.require_name(), model.entity, "required_values/name");
+    assert_missing(
+        current.require_values_at(0),
+        model.entity,
+        "required_values/values",
+    );
+    assert_missing(
+        current.require_scores_seek("primary"),
+        model.entity,
+        "required_values/scores",
+    );
+    assert_missing(
+        current.require_target(),
+        model.entity,
+        "required_values/target",
+    );
+
+    model
+        .transact()
+        .set_name("required")
+        .push_values("first")
+        .set_scores_seek("primary", 42)
+        .set_target(&target)
+        .commit()?;
+
+    let current = model.read();
+    assert_eq!(current.require_name()?, "required");
+    assert_eq!(current.require_values_at(0)?, "first");
+    assert_eq!(current.require_scores_seek("primary")?, 42);
+    assert_eq!(current.require_target()?.entity, target.entity);
+    assert_missing(
+        current.require_values_at(1),
+        model.entity,
+        "required_values/values",
+    );
+    assert_missing(
+        current.require_scores_seek("missing"),
+        model.entity,
+        "required_values/scores",
+    );
+    Ok(())
 }
 
 #[test]

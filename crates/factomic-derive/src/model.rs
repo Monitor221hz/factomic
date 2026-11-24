@@ -544,12 +544,14 @@ fn validate_method_names(fields: &[Field], errors: &mut Option<Error>) {
         let mut mutation_methods = vec![format!("set_{ident}")];
         match &field.kind {
             FieldKind::One { optional, .. } => {
+                read_methods.push(format!("require_{ident}"));
                 if *optional {
                     mutation_methods.push(format!("clear_{ident}"));
                 }
             }
             FieldKind::List(_) => {
                 read_methods.push(format!("{ident}_at"));
+                read_methods.push(format!("require_{ident}_at"));
                 mutation_methods.extend([
                     format!("set_{ident}_at"),
                     format!("push_{ident}"),
@@ -567,6 +569,7 @@ fn validate_method_names(fields: &[Field], errors: &mut Option<Error>) {
                 optional_values, ..
             } => {
                 read_methods.push(format!("{ident}_seek"));
+                read_methods.push(format!("require_{ident}_seek"));
                 mutation_methods
                     .extend([format!("set_{ident}_seek"), format!("remove_{ident}_key")]);
                 if *optional_values {
