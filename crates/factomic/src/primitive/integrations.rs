@@ -222,6 +222,15 @@ mod semver_support {
     crate::impl_string_primitive!(semver::Version, super::to_string, super::from_string);
 }
 
+#[cfg(feature = "versions")]
+mod versions_support {
+    crate::impl_string_primitive!(versions::Mess, super::to_string, super::from_string);
+    crate::impl_string_primitive!(versions::Requirement, super::to_string, super::from_string);
+    crate::impl_string_primitive!(versions::SemVer, super::to_string, super::from_string);
+    crate::impl_string_primitive!(versions::Version, super::to_string, super::from_string);
+    crate::impl_string_primitive!(versions::Versioning, super::to_string, super::from_string);
+}
+
 #[cfg(feature = "ulid")]
 mod ulid_support {
     crate::impl_string_primitive!(ulid::Ulid, super::to_string, super::from_string);

@@ -94,6 +94,7 @@ External integrations are opt-in through Cargo features:
 | `ulid`          | `ulid::Ulid`                                                              | String                                                     |
 | `url`           | `url::Url`                                                                | String                                                     |
 | `uuid`          | `uuid::Uuid`                                                              | Bytes                                                      |
+| `versions`      | `versions::{SemVer, Version, Mess, Versioning, Requirement}`              | String                                                     |
 
 ## ID allocation
 

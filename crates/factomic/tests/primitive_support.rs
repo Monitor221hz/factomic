@@ -166,6 +166,21 @@ fn semver_support_round_trips() {
     assert_round_trip(value.clone(), Value::String(value.to_string()));
 }
 
+#[cfg(feature = "versions")]
+#[test]
+fn versions_support_round_trips() {
+    let value = versions::SemVer::new("1.2.3-alpha.1+build.5").unwrap();
+    assert_round_trip(value.clone(), Value::String(value.to_string()));
+    let value = versions::Version::new("1.2.3r1").unwrap();
+    assert_round_trip(value.clone(), Value::String(value.to_string()));
+    let value = versions::Mess::new("2:10.2+0.0093r3+1-1").unwrap();
+    assert_round_trip(value.clone(), Value::String(value.to_string()));
+    let value = versions::Versioning::new("1.6.0a+2014+m872b87e73dfb-1").unwrap();
+    assert_round_trip(value.clone(), Value::String(value.to_string()));
+    let value = versions::Requirement::new("^1.2.3").unwrap();
+    assert_round_trip(value.clone(), Value::String(value.to_string()));
+}
+
 #[cfg(feature = "ulid")]
 #[test]
 fn ulid_support_round_trips() {
