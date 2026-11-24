@@ -40,6 +40,7 @@ struct SmallInts {
     signed: i8,
     medium: i32,
     unsigned: u32,
+    ratio: f32,
     values: Vec<i16>,
     tags: std::collections::HashSet<u8>,
 }
@@ -210,6 +211,15 @@ impl TryFrom<Value> for Score {
 }
 
 #[derive(Debug, PartialEq)]
+struct GenericScore<T>(T);
+
+factomic::impl_long_primitive!(
+    GenericScore<i64>,
+    |value: &GenericScore<i64>| value.0,
+    |value: i64| Ok(GenericScore(value)),
+);
+
+#[derive(Debug, PartialEq)]
 struct CustomMapKey(i64);
 
 impl Primitive for CustomMapKey {
@@ -253,6 +263,8 @@ struct CustomValues {
     scores: Vec<Score>,
     #[factomic(value)]
     optional_score: Option<Score>,
+    #[factomic(value)]
+    generic_score: GenericScore<i64>,
     #[factomic(ref)]
     explicit: ExplicitTarget,
 }
@@ -451,6 +463,7 @@ fn derive_supports_small_integer_types() -> Result<()> {
     tx.set_signed(-8)
         .set_medium(-123_456)
         .set_unsigned(42)
+        .set_ratio(1.5)
         .set_values([-1, 2].into_iter())
         .set_tags([1, 2, 1].into_iter());
     tx.commit()?;
@@ -459,6 +472,7 @@ fn derive_supports_small_integer_types() -> Result<()> {
     assert_eq!(current.signed()?, Some(-8));
     assert_eq!(current.medium()?, Some(-123_456));
     assert_eq!(current.unsigned()?, Some(42));
+    assert_eq!(current.ratio()?, Some(1.5));
     assert_eq!(current.values().collect::<Result<Vec<_>>>()?, vec![-1, 2]);
     assert_eq!(current.tags().collect::<Result<Vec<_>>>()?, vec![1, 2]);
     Ok(())
@@ -780,6 +794,7 @@ fn custom_values_and_explicit_references_generate_working_apis() -> Result<()> {
         .set_score(Score(11))
         .set_scores([Score(1), Score(2)].into_iter())
         .set_optional_score(Score(3))
+        .set_generic_score(GenericScore(17))
         .set_explicit(target.entity)
         .commit()?;
     let current = model.read();
@@ -790,6 +805,7 @@ fn custom_values_and_explicit_references_generate_working_apis() -> Result<()> {
         vec![Score(1), Score(2)]
     );
     assert_eq!(current.optional_score()?, Some(Score(3)));
+    assert_eq!(current.generic_score()?, Some(GenericScore(17)));
     assert_eq!(current.explicit()?.expect("target").entity, target.entity);
     let found = store
         .db()

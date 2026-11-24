@@ -320,13 +320,6 @@ impl Db {
     where
         T: TryFrom<Value, Error = crate::Error>,
     {
-        // let Some(slot) = self.slot_at(entity, attr, ordinal)? else {
-        //     return Ok(None);
-        // };
-        // self.prefix_entity_factom(&keys::easv_entity_attr_slot_prefix(entity, attr, &slot))?
-        //     .map(|f| f.try_to_value())
-        //     .transpose()
-        //
         self.map_easvt_prefix(
             keys::easv_entity_attr_prefix(entity, attr),
             |easv| T::try_from(keys::decode_v_easv_key(easv)?),

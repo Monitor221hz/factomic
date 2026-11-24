@@ -65,6 +65,36 @@ fn main() -> Result<()> {
 
 See `crates/factomic-derive/README.md` for field syntax and `crates/factomic-example/src/main.rs` for a complete example.
 
+## Primitive support
+
+In addition to the built-in numeric, string, entity-reference, and Jiff timestamp types, Factomic supports `f32`, `char`, nonzero integers representable by `i64`, standard IP/socket addresses, `Duration`, and `SystemTime`. Durations and system times use lossless binary representations.
+
+Additional standard-library and external value types use `#[factomic(value)]` on entity fields.
+
+For Primitive downstream types, use `#[factomic::primitive(string)]`, `long`, `timestamp`, or `bytes` on a non-generic local type with the corresponding conversion traits.
+
+The `impl_string_primitive!`, `impl_long_primitive!`, `impl_timestamp_primitive!`, and `impl_bytes_primitive!` can be used for more non conversion trait conforming types.
+
+External integrations are opt-in through Cargo features:
+
+| Feature         | Types                                                                     | Stored representation                                      |
+| --------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `bigdecimal`    | `bigdecimal::BigDecimal`                                                  | String                                                     |
+| `bytes`         | `bytes::Bytes`                                                            | Bytes                                                      |
+| `camino`        | `camino::Utf8PathBuf`                                                     | String                                                     |
+| `chrono`        | `chrono::DateTime<Utc>`, `DateTime<FixedOffset>`, naive date/time types   | Timestamp for UTC; strings otherwise                       |
+| `http`          | `http::Uri`                                                               | String                                                     |
+| `ipnet`         | `ipnet::{IpNet, Ipv4Net, Ipv6Net}`                                        | String                                                     |
+| `jiff-extended` | Jiff civil date/time types, `SignedDuration`, `Span`, and `ZonedDateTime` | String                                                     |
+| `num-bigint`    | `num_bigint::{BigInt, BigUint}`                                           | String                                                     |
+| `rust_decimal`  | `rust_decimal::Decimal`                                                   | String                                                     |
+| `semver`        | `semver::Version`                                                         | String                                                     |
+| `serde-json`    | `serde_json::Value`                                                       | String                                                     |
+| `time`          | `time::OffsetDateTime`, `Date`, `PrimitiveDateTime`, and `Time`           | Timestamp for `OffsetDateTime`; ISO 8601 strings otherwise |
+| `ulid`          | `ulid::Ulid`                                                              | String                                                     |
+| `url`           | `url::Url`                                                                | String                                                     |
+| `uuid`          | `uuid::Uuid`                                                              | Bytes                                                      |
+
 ## ID allocation
 
 Entity and Transaction IDs increase monotonically but are not guaranteed to be contiguous. Allocating an entity consumes its ID even if no facts are asserted.
@@ -82,7 +112,7 @@ cargo run -p factomic-example
 
 Run the Criterion benchmarks with `cargo bench -p factomic-benches`, or compile them without running using `cargo bench -p factomic-benches --no-run`.
 
-Reports are written to `target/criterion/report/index.html`. 
+Reports are written to `target/criterion/report/index.html`.
 
 Save and compare baselines with:
 
@@ -93,9 +123,10 @@ cargo bench -p factomic-benches -- --baseline main
 
 ### Latest measured results
 
-Specs: AMD Ryzen 7 9800X3D, 94 GiB RAM, Windows 11 Home 26200, Samsung SSD 990 PRO 1TB. 
+Specs: AMD Ryzen 7 9800X3D, 94 GiB RAM, Windows 11 Home 26200, Samsung SSD 990 PRO 1TB.
 
-Versions: 
+Versions:
+
 - Factomic 0.3.0
 - fjall 3.1.13
 - redb 5.0.0
@@ -109,39 +140,39 @@ It should be noted that Factomic writes also include indexes, history, and trans
 
 #### Comparison
 
-| Benchmark | Factomic | fjall | redb | rusqlite | heed | native_db |
-|---|---:|---:|---:|---:|---:|---:|
-| `commit_1` | 1.482 ms | 1.496 ms | 1.373 ms | 1.420 ms | 248.1 µs | 1.514 ms |
-| `commit_100` | 1.577 ms | 1.769 ms | 2.872 ms | 2.849 ms | 273.2 µs | 3.058 ms |
-| `point_read` | 785 ns | 314 ns | 755 ns | 2.565 µs | 149 ns | 824 ns |
-| `range_read_100` | 18.13 µs | 14.51 µs | 8.78 µs | 8.70 µs | 5.03 µs | 15.41 µs |
+| Benchmark               |        Factomic |           fjall |            redb |        rusqlite |             heed |       native_db |
+| ----------------------- | --------------: | --------------: | --------------: | --------------: | ---------------: | --------------: |
+| `commit_1`              |        1.482 ms |        1.496 ms |        1.373 ms |        1.420 ms |         248.1 µs |        1.514 ms |
+| `commit_100`            |        1.577 ms |        1.769 ms |        2.872 ms |        2.849 ms |         273.2 µs |        3.058 ms |
+| `point_read`            |          785 ns |          314 ns |          755 ns |        2.565 µs |           149 ns |          824 ns |
+| `range_read_100`        |        18.13 µs |        14.51 µs |         8.78 µs |         8.70 µs |          5.03 µs |        15.41 µs |
 | `commit_100` throughput | 63.4K entries/s | 56.5K entries/s | 34.8K entries/s | 35.1K entries/s | 366.1K entries/s | 32.7K entries/s |
 
 #### Workloads
 
-| Operation | Result |
-|---|---:|
-| Create one complete record | 2.819 ms |
-| Create 10 records in one fact transaction | 15.58 ms total, 642 records/s |
-| Read a complete record | 4.39 µs, approximately 228K records/s |
-| Update indexed field | 1.348 ms |
-| Append list item | 1.391 ms |
-| Update map entry | 1.607 ms |
-| Retract entity | 1.251 ms |
-| Revert database to transaction | 1.481 ms |
-| Revert database to time | 1.624 ms |
-| Undo transaction | 1.466 ms |
-| Undo latest entity transaction | 1.404 ms |
-| Assert one fact | 698 facts/s |
-| Assert 10 facts in one transaction | 7.26K facts/s |
-| Assert 100 facts in one transaction | 60.9K facts/s |
-| Overwrite indexed fact | 705 overwrites/s |
-| Declare one attribute | 1.566 ms |
-| Declare 16 attributes in one transaction | 1.438 ms, approximately 11.1K attributes/s |
-| Allocate an entity | 1.403 ms |
-| Open a fresh store | 234.68 ms |
-| Reopen the small populated store | 9.97 ms |
-| Reopen the 1,000-fact store | 21.68 ms |
+| Operation                                 |                                     Result |
+| ----------------------------------------- | -----------------------------------------: |
+| Create one complete record                |                                   2.819 ms |
+| Create 10 records in one fact transaction |              15.58 ms total, 642 records/s |
+| Read a complete record                    |      4.39 µs, approximately 228K records/s |
+| Update indexed field                      |                                   1.348 ms |
+| Append list item                          |                                   1.391 ms |
+| Update map entry                          |                                   1.607 ms |
+| Retract entity                            |                                   1.251 ms |
+| Revert database to transaction            |                                   1.481 ms |
+| Revert database to time                   |                                   1.624 ms |
+| Undo transaction                          |                                   1.466 ms |
+| Undo latest entity transaction            |                                   1.404 ms |
+| Assert one fact                           |                                698 facts/s |
+| Assert 10 facts in one transaction        |                              7.26K facts/s |
+| Assert 100 facts in one transaction       |                              60.9K facts/s |
+| Overwrite indexed fact                    |                           705 overwrites/s |
+| Declare one attribute                     |                                   1.566 ms |
+| Declare 16 attributes in one transaction  | 1.438 ms, approximately 11.1K attributes/s |
+| Allocate an entity                        |                                   1.403 ms |
+| Open a fresh store                        |                                  234.68 ms |
+| Reopen the small populated store          |                                    9.97 ms |
+| Reopen the 1,000-fact store               |                                   21.68 ms |
 
 ## Database comparisons
 

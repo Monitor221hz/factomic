@@ -1,0 +1,5 @@
+error: generic primitive types are not supported
+ --> tests/ui/primitive_generic.rs:2:13
+  |
+2 | struct Value<T>(T);
+  |             ^^^

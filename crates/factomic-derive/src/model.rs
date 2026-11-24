@@ -48,6 +48,7 @@ pub enum PrimitiveKind {
     U8,
     U16,
     U32,
+    F32,
     F64,
     String,
     EntityId,
@@ -366,13 +367,11 @@ fn parse_cell(ty: &Type, value: bool, reference: bool) -> Result<Cell> {
             "#[factomic(value)] cannot be applied to Arc references",
         ));
     }
-    if !arguments.is_empty() {
-        let message = if value {
-            "container aliases and other generic value types are not supported".to_string()
-        } else {
-            format!("unsupported generic field type `{name}`")
-        };
-        return Err(Error::new_spanned(ty, message));
+    if !arguments.is_empty() && !value {
+        return Err(Error::new_spanned(
+            ty,
+            format!("unsupported generic field type `{name}`"),
+        ));
     }
     if reference {
         return Ok(Cell::Reference(ty.clone()));
@@ -410,6 +409,7 @@ fn primitive_kind(ty: &Type) -> Option<PrimitiveKind> {
             "u8" => return Some(PrimitiveKind::U8),
             "u16" => return Some(PrimitiveKind::U16),
             "u32" => return Some(PrimitiveKind::U32),
+            "f32" => return Some(PrimitiveKind::F32),
             "f64" => return Some(PrimitiveKind::F64),
             _ => {}
         }

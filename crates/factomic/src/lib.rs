@@ -32,4 +32,4 @@ pub use store::{AttributeDef, Db, Store, Transaction};
 pub use value::{Type, Value};
 
 #[cfg(feature = "derive")]
-pub use factomic_derive::Entity;
+pub use factomic_derive::{Entity, primitive};

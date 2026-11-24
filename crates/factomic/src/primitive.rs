@@ -4,6 +4,8 @@ use crate::error::{Error, Result};
 use crate::id::EntityId;
 use crate::value::Type;
 
+mod integrations;
+
 pub trait Primitive: Sized {
     const TYPE: Type;
 }
@@ -32,6 +34,148 @@ pub trait EncodePrimitive: Primitive {
 /// Which successfully counters the shift
 pub trait DecodePrimitive<'a>: Sized + Primitive {
     fn decode(bytes: &'a [u8]) -> Result<Self>;
+}
+
+/// Implements primitive support for an owned type stored as a Factomic string.
+#[macro_export]
+macro_rules! impl_string_primitive {
+    ($ty:ty, $as_str:path, $from_string:expr $(,)?) => {
+        impl $crate::Primitive for $ty {
+            const TYPE: $crate::Type = $crate::Type::String;
+        }
+
+        impl $crate::EncodePrimitive for $ty {
+            fn encode(&self, buf: &mut ::std::vec::Vec<u8>) {
+                $crate::EncodePrimitive::encode(&($as_str)(self), buf);
+            }
+        }
+
+        impl $crate::DecodePrimitive<'_> for $ty {
+            fn decode(bytes: &[u8]) -> $crate::Result<Self> {
+                let value = <::std::string::String as $crate::DecodePrimitive>::decode(bytes)?;
+                ($from_string)(value)
+            }
+        }
+
+        impl ::core::convert::TryFrom<$crate::Value> for $ty {
+            type Error = $crate::Error;
+
+            fn try_from(value: $crate::Value) -> $crate::Result<Self> {
+                let value =
+                    <::std::string::String as ::core::convert::TryFrom<$crate::Value>>::try_from(
+                        value,
+                    )?;
+                ($from_string)(value)
+            }
+        }
+    };
+}
+
+/// Implements primitive support for an owned type stored as a Factomic long.
+#[macro_export]
+macro_rules! impl_long_primitive {
+    ($ty:ty, $as_i64:expr, $from_i64:expr $(,)?) => {
+        impl $crate::Primitive for $ty {
+            const TYPE: $crate::Type = $crate::Type::Long;
+        }
+
+        impl $crate::EncodePrimitive for $ty {
+            fn encode(&self, buf: &mut ::std::vec::Vec<u8>) {
+                $crate::EncodePrimitive::encode(&($as_i64)(self), buf);
+            }
+        }
+
+        impl $crate::DecodePrimitive<'_> for $ty {
+            fn decode(bytes: &[u8]) -> $crate::Result<Self> {
+                let value = <i64 as $crate::DecodePrimitive>::decode(bytes)?;
+                ($from_i64)(value)
+            }
+        }
+
+        impl ::core::convert::TryFrom<$crate::Value> for $ty {
+            type Error = $crate::Error;
+
+            fn try_from(value: $crate::Value) -> $crate::Result<Self> {
+                let value = <i64 as ::core::convert::TryFrom<$crate::Value>>::try_from(value)?;
+                ($from_i64)(value)
+            }
+        }
+    };
+}
+
+/// Implements primitive support for an owned type stored as a Factomic timestamp.
+#[macro_export]
+macro_rules! impl_timestamp_primitive {
+    ($ty:ty, $as_microsecond:expr, $from_microsecond:expr $(,)?) => {
+        impl $crate::Primitive for $ty {
+            const TYPE: $crate::Type = $crate::Type::Timestamp;
+        }
+
+        impl $crate::EncodePrimitive for $ty {
+            fn encode(&self, buf: &mut ::std::vec::Vec<u8>) {
+                $crate::EncodePrimitive::encode(&($as_microsecond)(self), buf);
+            }
+        }
+
+        impl $crate::DecodePrimitive<'_> for $ty {
+            fn decode(bytes: &[u8]) -> $crate::Result<Self> {
+                let micros = <i64 as $crate::DecodePrimitive>::decode(bytes)
+                    .map_err(|_| $crate::Error::CorruptPrimitive($crate::Type::Timestamp))?;
+                ($from_microsecond)(micros)
+            }
+        }
+
+        impl ::core::convert::TryFrom<$crate::Value> for $ty {
+            type Error = $crate::Error;
+
+            fn try_from(value: $crate::Value) -> $crate::Result<Self> {
+                let timestamp = match value {
+                    $crate::Value::Timestamp(timestamp) => timestamp,
+                    other => {
+                        return ::core::result::Result::Err($crate::Error::ValueTypeMismatch {
+                            expected: $crate::Type::Timestamp,
+                            got: other.value_type(),
+                        });
+                    }
+                };
+                ($from_microsecond)(timestamp.as_microsecond())
+            }
+        }
+    };
+}
+
+/// Implements primitive support for an owned type stored as Factomic bytes.
+#[macro_export]
+macro_rules! impl_bytes_primitive {
+    ($ty:ty, $as_bytes:path, $from_bytes:expr $(,)?) => {
+        impl $crate::Primitive for $ty {
+            const TYPE: $crate::Type = $crate::Type::Bytes;
+        }
+
+        impl $crate::EncodePrimitive for $ty {
+            fn encode(&self, buf: &mut ::std::vec::Vec<u8>) {
+                buf.extend_from_slice(($as_bytes)(self));
+            }
+        }
+
+        impl $crate::DecodePrimitive<'_> for $ty {
+            fn decode(bytes: &[u8]) -> $crate::Result<Self> {
+                ($from_bytes)(::std::vec::Vec::from(bytes))
+            }
+        }
+
+        impl ::core::convert::TryFrom<$crate::Value> for $ty {
+            type Error = $crate::Error;
+
+            fn try_from(value: $crate::Value) -> $crate::Result<Self> {
+                let value =
+                    <::std::vec::Vec<u8> as ::core::convert::TryFrom<$crate::Value>>::try_from(
+                        value,
+                    )?;
+                ($from_bytes)(value)
+            }
+        }
+    };
 }
 
 impl Primitive for EntityId {
@@ -256,11 +400,114 @@ impl<'a> DecodePrimitive<'a> for &'a [u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Value;
 
     fn encoded(value: &impl EncodePrimitive) -> Vec<u8> {
         let mut buf = Vec::new();
         value.encode(&mut buf);
         buf
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct StringPrimitive(String);
+
+    impl StringPrimitive {
+        fn as_str(&self) -> &str {
+            self.0.as_str()
+        }
+    }
+
+    impl_string_primitive!(
+        StringPrimitive,
+        StringPrimitive::as_str,
+        |value: String| Ok(StringPrimitive(value)),
+    );
+
+    #[derive(Debug, PartialEq)]
+    struct LongPrimitive(i64);
+
+    impl_long_primitive!(
+        LongPrimitive,
+        |value: &LongPrimitive| value.0,
+        |value: i64| Ok(LongPrimitive(value)),
+    );
+
+    #[derive(Debug, PartialEq)]
+    struct TimestampPrimitive(Timestamp);
+
+    impl_timestamp_primitive!(
+        TimestampPrimitive,
+        |value: &TimestampPrimitive| value.0.as_microsecond(),
+        |micros: i64| {
+            Timestamp::from_microsecond(micros)
+                .map(TimestampPrimitive)
+                .map_err(|_| Error::CorruptPrimitive(Type::Timestamp))
+        },
+    );
+
+    #[derive(Debug, PartialEq)]
+    struct BytesPrimitive(Vec<u8>);
+
+    impl BytesPrimitive {
+        fn as_slice(&self) -> &[u8] {
+            self.0.as_slice()
+        }
+
+        fn from_bytes(value: Vec<u8>) -> Result<Self> {
+            Ok(Self(value))
+        }
+    }
+
+    impl_bytes_primitive!(
+        BytesPrimitive,
+        BytesPrimitive::as_slice,
+        BytesPrimitive::from_bytes,
+    );
+
+    #[test]
+    fn string_primitive_macro_round_trip() {
+        let value = StringPrimitive("hello".to_owned());
+        assert_eq!(StringPrimitive::TYPE, Type::String);
+        assert_eq!(encoded(&value), encoded(&value.0));
+        assert_eq!(StringPrimitive::decode(&encoded(&value)).unwrap(), value);
+        assert_eq!(
+            StringPrimitive::try_from(Value::String("hello".to_owned())).unwrap(),
+            value
+        );
+    }
+
+    #[test]
+    fn long_primitive_macro_round_trip() {
+        let value = LongPrimitive(-42);
+        assert_eq!(LongPrimitive::TYPE, Type::Long);
+        assert_eq!(encoded(&value), encoded(&value.0));
+        assert_eq!(LongPrimitive::decode(&encoded(&value)).unwrap(), value);
+        assert_eq!(LongPrimitive::try_from(Value::Long(-42)).unwrap(), value);
+    }
+
+    #[test]
+    fn timestamp_primitive_macro_round_trip() {
+        let timestamp = Timestamp::from_microsecond(1_753_000_000_000_000).unwrap();
+        let value = TimestampPrimitive(timestamp);
+        assert_eq!(TimestampPrimitive::TYPE, Type::Timestamp);
+        assert_eq!(encoded(&value), encoded(&timestamp));
+        assert_eq!(TimestampPrimitive::decode(&encoded(&value)).unwrap(), value);
+        assert_eq!(
+            TimestampPrimitive::try_from(Value::Timestamp(timestamp)).unwrap(),
+            value
+        );
+    }
+
+    #[test]
+    fn bytes_primitive_macro_round_trip() {
+        let value = BytesPrimitive(vec![1, 2, 3]);
+        assert_eq!(BytesPrimitive::TYPE, Type::Bytes);
+        assert_eq!(encoded(&value), vec![1, 2, 3]);
+        assert_eq!(BytesPrimitive::decode(&encoded(&value)).unwrap(), value);
+        assert_eq!(
+            BytesPrimitive::try_from(Value::Bytes(vec![1, 2, 3])).unwrap(),
+            value
+        );
     }
 
     #[test]

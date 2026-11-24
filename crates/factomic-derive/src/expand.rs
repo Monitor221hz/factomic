@@ -784,7 +784,7 @@ fn schema_type(cell: &Cell) -> TokenStream {
             | PrimitiveKind::U8
             | PrimitiveKind::U16
             | PrimitiveKind::U32 => quote!(::factomic::Type::Long),
-            PrimitiveKind::F64 => quote!(::factomic::Type::Double),
+            PrimitiveKind::F32 | PrimitiveKind::F64 => quote!(::factomic::Type::Double),
             PrimitiveKind::String => quote!(::factomic::Type::String),
             PrimitiveKind::EntityId => quote!(::factomic::Type::Ref),
             PrimitiveKind::Timestamp => quote!(::factomic::Type::Timestamp),

@@ -1,0 +1,7 @@
+error: unexpected end of input, expected `string`, `long`, `timestamp`, or `bytes`
+ --> tests/ui/primitive_missing_representation.rs:1:1
+  |
+1 | #[factomic::primitive]
+  | ^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `factomic::primitive` (in Nightly builds, run with -Z macro-backtrace for more info)
