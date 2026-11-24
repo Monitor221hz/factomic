@@ -1,6 +1,6 @@
 [package]
 name = "factomic"
-version = "0.3.2"
+version = "0.3.3"
 description = "Unitemporal, embedded fact database backed by fjall with typed entity handles and ordered list operations."
 edition.workspace = true
 rust-version.workspace = true
@@ -29,7 +29,7 @@ uuid = ["dep:uuid"]
 versions = ["dep:versions"]
 
 [dependencies]
-factomic-derive = { path = "../factomic-derive", version = "0.3.2", optional = true }
+factomic-derive = { path = "../factomic-derive", version = "0.3.3", optional = true }
 fjall.workspace = true
 thiserror.workspace = true
 jiff.workspace = true
