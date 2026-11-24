@@ -1,6 +1,6 @@
 [package]
 name = "factomic-derive"
-version = "0.3.3"
+version = "0.3.4"
 description = "Derive macros for factomic's typed entity schemas and handles"
 edition.workspace = true
 rust-version.workspace = true

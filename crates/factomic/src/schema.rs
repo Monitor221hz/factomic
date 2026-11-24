@@ -45,11 +45,20 @@ impl<T: Entity> DbQuery<T> {
     }
 }
 
-#[derive(Clone)]
 pub struct DbHandle<T: Entity> {
     pub db: Arc<Db>,
     pub schema: Arc<T::Schema>,
     pub entity: EntityId,
+}
+
+impl<T: Entity> Clone for DbHandle<T> {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            schema: self.schema.clone(),
+            entity: self.entity,
+        }
+    }
 }
 
 impl<T: Entity> DbHandle<T> {
@@ -134,11 +143,20 @@ impl Db {
     }
 }
 
-#[derive(Clone)]
 pub struct DbHandleMut<T: Entity> {
     pub db: Arc<Store>,
     pub schema: Arc<T::Schema>,
     pub entity: EntityId,
+}
+
+impl<T: Entity> Clone for DbHandleMut<T> {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            schema: self.schema.clone(),
+            entity: self.entity,
+        }
+    }
 }
 
 impl<T: Entity> From<DbHandleMut<T>> for EntityId {
